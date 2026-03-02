@@ -1,0 +1,34 @@
+[package]
+name = "bevy_debugger_challenge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.15", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_picking",
+    "bevy_render",
+    "bevy_sprite",
+    "bevy_state",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_winit",
+    "default_font",
+    "multi_threaded",
+    "tonemapping_luts",
+] }
+
+# Bevy recommends opt-level 1+ for the app and level 2 for deps (wgpu/rendering).
+# Without this, generic Bevy code (queries, state checks) monomorphized in the
+# app crate runs unoptimized and causes choppy frame times.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+debug = true
+strip = false
