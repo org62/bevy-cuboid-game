@@ -2,10 +2,10 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
 use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, MovementBounds, Player,
-    PlayerPhysics,
+    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
+    Player, PlayerPhysics,
 };
-use crate::{CannonPhase, Screen, Scoreboard};
+use crate::{CannonPhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level2Plugin;
 
@@ -24,7 +24,7 @@ impl Plugin for Level2Plugin {
             )
             .add_systems(
                 Update,
-                escape_to_menu.run_if(in_state(CannonPhase::Playing)),
+                (escape_to_menu, toggle_pause).run_if(in_state(CannonPhase::Playing)),
             )
             .add_systems(
                 Update,
@@ -72,6 +72,9 @@ struct CannonHintCloseButton;
 #[derive(Component)]
 struct OverlayScreen;
 
+#[derive(Component)]
+struct HurtFlash;
+
 // --- Resources ---
 
 #[repr(C)]
@@ -91,6 +94,11 @@ struct FireTimer {
     timer: Timer,
 }
 
+#[derive(Resource, Default)]
+struct HurtFlashState {
+    timer: f32,
+}
+
 #[derive(Resource)]
 struct ProjectileAssets {
     mesh: Handle<Mesh>,
@@ -102,7 +110,6 @@ struct ProjectileAssets {
 const ARENA_MIN: Vec2 = Vec2::new(-8.0, -6.0);
 const ARENA_MAX: Vec2 = Vec2::new(8.0, 6.0);
 const CANNON_POS: Vec3 = Vec3::new(0.0, 0.0, -3.0);
-const DANGER_RADIUS: f32 = 4.0;
 const DAMAGE_PER_HIT: i32 = 10;
 const HEAL_AMOUNT: i32 = 10;
 const MAX_HEAL_HP: i32 = 100;
@@ -147,6 +154,7 @@ fn setup_cannon_arena(
     commands.insert_resource(FireTimer {
         timer: Timer::from_seconds(FIRE_INTERVAL, TimerMode::Repeating),
     });
+    commands.insert_resource(HurtFlashState::default());
 
     let proj_mesh = meshes.add(Sphere::new(0.15));
     let proj_mat = materials.add(StandardMaterial {
@@ -167,20 +175,6 @@ fn setup_cannon_arena(
             ..default()
         })),
         Transform::from_xyz(0.0, 0.0, 0.0),
-        CannonEntity,
-    ));
-
-    // Danger zone
-    commands.spawn((
-        Mesh3d(meshes.add(Circle::new(DANGER_RADIUS))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.9, 0.15, 0.1, 0.3),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            ..default()
-        })),
-        Transform::from_xyz(CANNON_POS.x, 0.005, CANNON_POS.z)
-            .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
         CannonEntity,
     ));
 
@@ -258,6 +252,20 @@ fn setup_cannon_arena(
     // Health cubes (green)
     spawn_health_cubes(&mut commands, &mut meshes, &mut materials);
 
+    // Hurt flash overlay (starts transparent)
+    commands.spawn((
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            position_type: PositionType::Absolute,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.8, 0.0, 0.0, 0.0)),
+        GlobalZIndex(5),
+        HurtFlash,
+        CannonEntity,
+    ));
+
     // HUD - health badge
     commands
         .spawn((
@@ -294,7 +302,7 @@ fn setup_cannon_arena(
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump"),
+                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
                 TextFont { font_size: 20.0, ..default() },
                 TextColor(Color::srgb(0.9, 0.9, 0.9)),
             ));
@@ -366,9 +374,8 @@ fn spawn_health_cubes(
     });
     let cube_mesh = meshes.add(Cuboid::new(0.4, 0.4, 0.4));
 
-    let positions: [(f32, f32); 8] = [
-        (-5.0, -4.0), (5.0, -4.0), (-3.0, -2.0), (3.0, -2.0),
-        (-1.0, -3.0), (1.0, -3.0), (-5.0, 4.0),  (5.0, 4.0),
+    let positions: [(f32, f32); 4] = [
+        (-5.0, -4.0), (5.0, -4.0), (-5.0, 4.0), (5.0, 4.0),
     ];
 
     for &(x, z) in &positions {
@@ -410,7 +417,12 @@ fn cannon_playing_update(
         (&Transform, &mut HealthCube, &mut Visibility),
         (Without<Player>, Without<CannonPivot>, Without<CannonProjectile>),
     >,
+    game_paused: Res<GamePaused>,
+    mut hurt_flash: ResMut<HurtFlashState>,
 ) {
+    if game_paused.0 {
+        return;
+    }
     let dt = time.delta_secs();
 
     let Ok(player_transform) = player_q.get_single() else {
@@ -460,6 +472,7 @@ fn cannon_playing_update(
         transform.translation += proj.velocity * dt;
         if transform.translation.distance_squared(player_center) < 1.0 {
             apply_cannon_damage(&mut health, DAMAGE_PER_HIT);
+            hurt_flash.timer = 0.3;
             commands.entity(entity).despawn_recursive();
         }
     }
@@ -486,7 +499,7 @@ fn cannon_playing_update(
         if dx * dx + dz * dz < 1.5 * 1.5 {
             collect_health_cube(&mut health, HEAL_AMOUNT);
             *vis = Visibility::Hidden;
-            cube.respawn_timer = Some(Timer::from_seconds(7.0, TimerMode::Once));
+            cube.respawn_timer = Some(Timer::from_seconds(15.0, TimerMode::Once));
         }
     }
 
@@ -521,9 +534,20 @@ fn cannon_visual_update(
     mut text_q: Query<&mut Text, With<HealthHudText>>,
     hint_q: Query<Entity, With<CannonHintBox>>,
     btn_q: Query<&Interaction, (Changed<Interaction>, With<CannonHintCloseButton>)>,
+    mut hurt_flash: ResMut<HurtFlashState>,
+    mut flash_q: Query<&mut BackgroundColor, With<HurtFlash>>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
+
+    // Hurt flash fade
+    if hurt_flash.timer > 0.0 {
+        hurt_flash.timer = (hurt_flash.timer - dt).max(0.0);
+        let alpha = (hurt_flash.timer / 0.3).clamp(0.0, 1.0) * 0.45;
+        if let Ok(mut bg) = flash_q.get_single_mut() {
+            *bg = BackgroundColor(Color::srgba(0.8, 0.0, 0.0, alpha));
+        }
+    }
 
     // Camera follow
     let player_pos = player_q.get_single().map(|t| t.translation).ok();
@@ -691,5 +715,63 @@ fn handle_death(
 fn cleanup_cannon(mut commands: Commands, query: Query<Entity, With<CannonEntity>>) {
     for entity in &query {
         commands.entity(entity).despawn_recursive();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_victory_requires_1000() {
+        assert!(!check_health_victory(&PlayerHealth { current: 100 }));
+        assert!(!check_health_victory(&PlayerHealth { current: 999 }));
+        assert!(check_health_victory(&PlayerHealth { current: 1000 }));
+        assert!(check_health_victory(&PlayerHealth { current: 2000 }));
+    }
+
+    #[test]
+    fn cannon_damage_reduces_health() {
+        let mut hp = PlayerHealth { current: 100 };
+        apply_cannon_damage(&mut hp, 10);
+        assert_eq!(hp.current, 90);
+    }
+
+    #[test]
+    fn cannon_damage_floors_at_zero() {
+        let mut hp = PlayerHealth { current: 5 };
+        apply_cannon_damage(&mut hp, 20);
+        assert_eq!(hp.current, 0);
+    }
+
+    #[test]
+    fn health_cube_heals_capped_at_100() {
+        let mut hp = PlayerHealth { current: 50 };
+        collect_health_cube(&mut hp, HEAL_AMOUNT);
+        assert_eq!(hp.current, 60);
+
+        let mut hp2 = PlayerHealth { current: 95 };
+        collect_health_cube(&mut hp2, HEAL_AMOUNT);
+        assert_eq!(hp2.current, MAX_HEAL_HP);
+    }
+
+    #[test]
+    fn win_impossible_through_normal_play() {
+        // Max health via cubes is 100, win requires 1000
+        let mut hp = PlayerHealth { current: 0 };
+        for _ in 0..200 {
+            collect_health_cube(&mut hp, HEAL_AMOUNT);
+        }
+        assert_eq!(hp.current, MAX_HEAL_HP);
+        assert!(!check_health_victory(&hp));
+    }
+
+    #[test]
+    fn debugger_scenario_set_health_to_1000() {
+        // Simulates: player sets breakpoint on check_health_victory,
+        // modifies health.current to 1000
+        let mut hp = PlayerHealth { current: 100 };
+        hp.current = WIN_HP; // debugger sets this
+        assert!(check_health_victory(&hp));
     }
 }

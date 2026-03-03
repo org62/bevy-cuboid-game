@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 
 use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, MovementBounds, Player,
+    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
+    Player,
 };
-use crate::{ChallengePhase, Screen, Scoreboard};
+use crate::{ChallengePhase, GamePaused, Screen, Scoreboard};
 
 const ALLOWED_MIN: Vec2 = Vec2::new(-6.0, -5.0);
 const ALLOWED_MAX: Vec2 = Vec2::new(6.0, 5.0);
@@ -23,7 +24,7 @@ impl Plugin for Level1Plugin {
             )
             .add_systems(
                 Update,
-                escape_to_menu.run_if(in_state(ChallengePhase::Exploring)),
+                (escape_to_menu, toggle_pause).run_if(in_state(ChallengePhase::Exploring)),
             )
             .add_systems(
                 Update,
@@ -199,7 +200,7 @@ fn setup_world(
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump"),
+                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
                 TextFont {
                     font_size: 20.0,
                     ..default()
@@ -496,7 +497,11 @@ fn detect_zone(
     player_query: Query<&Transform, With<Player>>,
     mut next_phase: ResMut<NextState<ChallengePhase>>,
     scoreboard: Res<Scoreboard>,
+    game_paused: Res<GamePaused>,
 ) {
+    if game_paused.0 {
+        return;
+    }
     if scoreboard.password_solved {
         return;
     }

@@ -26,6 +26,39 @@ struct ScoreboardText;
 #[derive(Component)]
 struct ChallengeButton(u32);
 
+const LEVEL_NAMES: [&str; 12] = [
+    "The Password Gate",
+    "The Cannon Gauntlet",
+    "The Countdown",
+    "The Invisible Maze",
+    "The Rigged Race",
+    "The Locked Chest",
+    "Gravity Flip",
+    "The Phantom Toll",
+    "Friendly Fire",
+    "The Loot Goblin",
+    "The Doppelganger",
+    "The Final Exam",
+];
+
+fn screen_for_level(level: u32) -> Option<Screen> {
+    match level {
+        1 => Some(Screen::PasswordChallenge),
+        2 => Some(Screen::CannonChallenge),
+        3 => Some(Screen::CountdownChallenge),
+        4 => Some(Screen::MazeChallenge),
+        5 => Some(Screen::RaceChallenge),
+        6 => Some(Screen::ChestChallenge),
+        7 => Some(Screen::GravityChallenge),
+        8 => Some(Screen::TollChallenge),
+        9 => Some(Screen::ArenaChallenge),
+        10 => Some(Screen::LootChallenge),
+        11 => Some(Screen::CloneChallenge),
+        12 => Some(Screen::FinalChallenge),
+        _ => None,
+    }
+}
+
 fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
     commands.spawn((Camera2d, MenuScreen));
 
@@ -36,8 +69,9 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
                 height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: Val::Px(24.0),
+                justify_content: JustifyContent::FlexStart,
+                padding: UiRect::all(Val::Px(16.0)),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
             MenuScreen,
@@ -47,10 +81,14 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
             parent.spawn((
                 Text::new("DEBUGGER CHALLENGES"),
                 TextFont {
-                    font_size: 52.0,
+                    font_size: 42.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.9, 0.9, 0.1)),
+                Node {
+                    margin: UiRect::bottom(Val::Px(8.0)),
+                    ..default()
+                },
             ));
 
             // Scoreboard
@@ -61,81 +99,85 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
                     scoreboard.total_challenges()
                 )),
                 TextFont {
-                    font_size: 26.0,
+                    font_size: 22.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.6, 0.9, 0.6)),
                 ScoreboardText,
+                Node {
+                    margin: UiRect::bottom(Val::Px(12.0)),
+                    ..default()
+                },
             ));
 
-            // Spacer
-            parent.spawn(Node {
-                height: Val::Px(16.0),
-                ..default()
-            });
-
-            // Challenge #1 button
-            let solved_1 = if scoreboard.password_solved {
-                " [SOLVED]"
-            } else {
-                ""
-            };
+            // Level buttons grid (2 columns)
             parent
-                .spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(32.0), Val::Px(12.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.2, 0.2, 0.3)),
-                    ChallengeButton(1),
-                ))
-                .with_children(|btn| {
-                    btn.spawn((
-                        Text::new(format!("#1 Password Challenge{}", solved_1)),
-                        TextFont {
-                            font_size: 28.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                    ));
-                });
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::Center,
+                    column_gap: Val::Px(10.0),
+                    row_gap: Val::Px(8.0),
+                    max_width: Val::Px(700.0),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for (i, name) in LEVEL_NAMES.iter().enumerate() {
+                        let level = (i + 1) as u32;
+                        let solved = scoreboard.is_solved(level);
+                        let label = if solved {
+                            format!("#{} {}", level, name)
+                        } else {
+                            format!("#{} {}", level, name)
+                        };
+                        let bg_color = if solved {
+                            Color::srgb(0.15, 0.3, 0.15)
+                        } else {
+                            Color::srgb(0.2, 0.2, 0.3)
+                        };
+                        let text_color = if solved {
+                            Color::srgb(0.5, 1.0, 0.5)
+                        } else {
+                            Color::srgb(0.9, 0.9, 0.9)
+                        };
 
-            // Challenge #2 button
-            let solved_2 = if scoreboard.cannon_solved {
-                " [SOLVED]"
-            } else {
-                ""
-            };
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(32.0), Val::Px(12.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.2, 0.2, 0.3)),
-                    ChallengeButton(2),
-                ))
-                .with_children(|btn| {
-                    btn.spawn((
-                        Text::new(format!("#2 Cannon Gauntlet{}", solved_2)),
-                        TextFont {
-                            font_size: 28.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.9, 0.9, 0.9)),
-                    ));
+                        grid.spawn((
+                            Button,
+                            Node {
+                                width: Val::Px(330.0),
+                                padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            },
+                            BackgroundColor(bg_color),
+                            BorderRadius::all(Val::Px(6.0)),
+                            ChallengeButton(level),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new(label),
+                                TextFont {
+                                    font_size: 18.0,
+                                    ..default()
+                                },
+                                TextColor(text_color),
+                            ));
+                        });
+                    }
                 });
 
             // Hint
             parent.spawn((
-                Text::new("Press 1 or 2 or click to start"),
+                Text::new("Press 1-9, 0, -, = or click to start"),
                 TextFont {
-                    font_size: 20.0,
+                    font_size: 16.0,
                     ..default()
                 },
                 TextColor(Color::srgb(0.5, 0.5, 0.5)),
+                Node {
+                    margin: UiRect::top(Val::Px(12.0)),
+                    ..default()
+                },
             ));
         });
 }
@@ -149,10 +191,25 @@ fn menu_keyboard(
             continue;
         }
         if let Key::Character(c) = &event.logical_key {
-            match c.as_str() {
-                "1" => next_state.set(Screen::PasswordChallenge),
-                "2" => next_state.set(Screen::CannonChallenge),
-                _ => {}
+            let level = match c.as_str() {
+                "1" => Some(1u32),
+                "2" => Some(2),
+                "3" => Some(3),
+                "4" => Some(4),
+                "5" => Some(5),
+                "6" => Some(6),
+                "7" => Some(7),
+                "8" => Some(8),
+                "9" => Some(9),
+                "0" => Some(10),
+                "-" => Some(11),
+                "=" => Some(12),
+                _ => None,
+            };
+            if let Some(l) = level {
+                if let Some(screen) = screen_for_level(l) {
+                    next_state.set(screen);
+                }
             }
         }
     }
@@ -164,10 +221,8 @@ fn menu_button_click(
 ) {
     for (inter, btn) in &interaction {
         if *inter == Interaction::Pressed {
-            match btn.0 {
-                1 => next_state.set(Screen::PasswordChallenge),
-                2 => next_state.set(Screen::CannonChallenge),
-                _ => {}
+            if let Some(screen) = screen_for_level(btn.0) {
+                next_state.set(screen);
             }
         }
     }

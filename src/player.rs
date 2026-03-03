@@ -1,5 +1,10 @@
 use bevy::prelude::*;
 
+use crate::GamePaused;
+
+#[derive(Component)]
+pub struct PauseOverlay;
+
 #[derive(Component)]
 pub struct Player;
 
@@ -36,9 +41,14 @@ pub const PLAYER_PUSHBACK: Vec3 = Vec3::new(4.0, 0.0, 0.0);
 const ACCELERATION: f32 = 30.0;
 const MAX_SPEED: f32 = 7.0;
 const FRICTION: f32 = 15.0;
-const GRAVITY: f32 = -25.0;
+pub const GRAVITY: f32 = -25.0;
 const JUMP_VELOCITY: f32 = 9.0;
 const GROUND_Y: f32 = 0.0;
+
+/// Optional resource that overrides the default gravity constant.
+/// Insert this resource to change gravity for a specific level.
+#[derive(Resource)]
+pub struct GravityOverride(pub f32);
 
 #[derive(Component)]
 pub struct MovementBounds {
@@ -140,8 +150,13 @@ pub fn spawn_player(
 pub fn player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    gravity_override: Option<Res<GravityOverride>>,
+    game_paused: Res<GamePaused>,
     mut query: Query<(&mut Transform, &mut PlayerPhysics, &mut SquashState, &MovementBounds), With<Player>>,
 ) {
+    if game_paused.0 {
+        return;
+    }
     let Ok((mut transform, mut physics, mut squash, bounds)) = query.get_single_mut() else {
         return;
     };
@@ -193,7 +208,8 @@ pub fn player_movement(
         physics.grounded = false;
     }
     if !physics.grounded {
-        physics.velocity.y += GRAVITY * dt;
+        let grav = gravity_override.as_ref().map_or(GRAVITY, |g| g.0);
+        physics.velocity.y += grav * dt;
     }
 
     let was_airborne = !physics.grounded;
@@ -228,10 +244,59 @@ pub fn player_movement(
 
 pub fn escape_to_menu(
     keyboard: Res<ButtonInput<KeyCode>>,
+    game_paused: Res<GamePaused>,
     mut next_screen: ResMut<NextState<crate::Screen>>,
 ) {
+    if game_paused.0 {
+        return;
+    }
     if keyboard.just_pressed(KeyCode::Escape) {
         next_screen.set(crate::Screen::Menu);
+    }
+}
+
+pub fn toggle_pause(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut game_paused: ResMut<GamePaused>,
+    mut commands: Commands,
+    overlay_q: Query<Entity, With<PauseOverlay>>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyP) {
+        game_paused.0 = !game_paused.0;
+        if game_paused.0 {
+            commands
+                .spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        position_type: PositionType::Absolute,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(16.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                    GlobalZIndex(20),
+                    PauseOverlay,
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new("PAUSED"),
+                        TextFont { font_size: 52.0, ..default() },
+                        TextColor(Color::srgb(1.0, 1.0, 1.0)),
+                    ));
+                    parent.spawn((
+                        Text::new("Press P to resume"),
+                        TextFont { font_size: 22.0, ..default() },
+                        TextColor(Color::srgb(0.7, 0.7, 0.7)),
+                    ));
+                });
+        } else {
+            for entity in &overlay_q {
+                commands.entity(entity).despawn_recursive();
+            }
+        }
     }
 }
 

@@ -325,3 +325,37 @@ fn cleanup_password_overlay(
         commands.entity(entity).despawn_recursive();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn correct_password_accepted() {
+        assert!(check_password("sesame"));
+    }
+
+    #[test]
+    fn wrong_password_rejected() {
+        assert!(!check_password("password"));
+        assert!(!check_password(""));
+        assert!(!check_password("SESAME"));
+        assert!(!check_password("sesam"));
+        assert!(!check_password("sesamee"));
+    }
+
+    #[test]
+    fn password_is_byte_by_byte() {
+        // Verify partial matches still fail
+        assert!(!check_password("sesam\0"));
+        assert!(!check_password("sesame\0"));
+    }
+
+    #[test]
+    fn debugger_scenario_find_password() {
+        // Simulates: player sets breakpoint on check_password,
+        // inspects `correct` variable, finds b"sesame", types it in
+        let found_password = std::str::from_utf8(b"sesame").unwrap();
+        assert!(check_password(found_password));
+    }
+}

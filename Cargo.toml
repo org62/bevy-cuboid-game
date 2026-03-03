@@ -20,6 +20,13 @@ bevy = { version = "0.15", default-features = false, features = [
     "tonemapping_luts",
 ] }
 
+[features]
+test_bot = ["dep:smol_str"]
+
+[dependencies.smol_str]
+version = "0.2"
+optional = true
+
 # Bevy recommends opt-level 1+ for the app and level 2 for deps (wgpu/rendering).
 # Without this, generic Bevy code (queries, state checks) monomorphized in the
 # app crate runs unoptimized and causes choppy frame times.

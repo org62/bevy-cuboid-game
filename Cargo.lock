@@ -416,6 +416,7 @@ name = "bevy_debugger_challenge"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "smol_str",
 ]
 
 [[package]]
