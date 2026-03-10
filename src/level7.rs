@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GravityOverride,
-    MovementBounds, Player, PlayerPhysics,
+    MovementBounds, Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{GamePaused, GravityPhase, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level7Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::GravityChallenge), setup_gravity)
             .add_systems(
-                FixedUpdate,
-                (player_movement, gravity_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), gravity_playing_update)
                     .chain()
                     .run_if(in_state(GravityPhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, gravity_visual_update).run_if(in_state(Screen::GravityChallenge)),
+                (animate_player, gravity_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::GravityChallenge)),
             )
             .add_systems(
                 Update,

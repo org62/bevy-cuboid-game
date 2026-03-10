@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerPhysics,
+    Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{GamePaused, TollPhase, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level8Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::TollChallenge), setup_toll)
             .add_systems(
-                FixedUpdate,
-                (player_movement, toll_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), toll_playing_update)
                     .chain()
                     .run_if(in_state(TollPhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, toll_visual_update).run_if(in_state(Screen::TollChallenge)),
+                (animate_player, toll_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::TollChallenge)),
             )
             .add_systems(
                 Update,

@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerPhysics,
+    Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{ClonePhase, GamePaused, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level11Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::CloneChallenge), setup_clone)
             .add_systems(
-                FixedUpdate,
-                (player_movement, clone_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), clone_playing_update)
                     .chain()
                     .run_if(in_state(ClonePhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, clone_visual_update).run_if(in_state(Screen::CloneChallenge)),
+                (animate_player, clone_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::CloneChallenge)),
             )
             .add_systems(
                 Update,

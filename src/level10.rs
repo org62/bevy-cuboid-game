@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerPhysics,
+    Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{GamePaused, LootPhase, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level10Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::LootChallenge), setup_loot)
             .add_systems(
-                FixedUpdate,
-                (player_movement, loot_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), loot_playing_update)
                     .chain()
                     .run_if(in_state(LootPhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, loot_visual_update).run_if(in_state(Screen::LootChallenge)),
+                (animate_player, loot_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::LootChallenge)),
             )
             .add_systems(
                 Update,

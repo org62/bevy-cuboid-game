@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player,
+    Player, PlayerMovementSet,
 };
 use crate::{ChallengePhase, GamePaused, Screen, Scoreboard};
 
@@ -18,8 +18,8 @@ impl Plugin for Level1Plugin {
         app.init_resource::<StarScore>()
             .add_systems(OnEnter(Screen::PasswordChallenge), setup_world)
             .add_systems(
-                FixedUpdate,
-                (player_movement, detect_zone)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), detect_zone)
                     .run_if(in_state(ChallengePhase::Exploring)),
             )
             .add_systems(
@@ -36,6 +36,7 @@ impl Plugin for Level1Plugin {
                     rotate_orb,
                     dismiss_hint,
                 )
+                    .after(PlayerMovementSet)
                     .run_if(in_state(Screen::PasswordChallenge)),
             )
             .add_systems(OnExit(Screen::PasswordChallenge), cleanup_world);

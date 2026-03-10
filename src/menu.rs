@@ -26,7 +26,7 @@ struct ScoreboardText;
 #[derive(Component)]
 struct ChallengeButton(u32);
 
-const LEVEL_NAMES: [&str; 12] = [
+const LEVEL_NAMES: [&str; 13] = [
     "The Password Gate",
     "The Cannon Gauntlet",
     "The Countdown",
@@ -39,6 +39,7 @@ const LEVEL_NAMES: [&str; 12] = [
     "The Loot Goblin",
     "The Doppelganger",
     "The Final Exam",
+    "The Hill Fortress",
 ];
 
 fn screen_for_level(level: u32) -> Option<Screen> {
@@ -55,6 +56,7 @@ fn screen_for_level(level: u32) -> Option<Screen> {
         10 => Some(Screen::LootChallenge),
         11 => Some(Screen::CloneChallenge),
         12 => Some(Screen::FinalChallenge),
+        13 => Some(Screen::HillChallenge),
         _ => None,
     }
 }
@@ -204,6 +206,7 @@ fn menu_keyboard(
                 "0" => Some(10),
                 "-" => Some(11),
                 "=" => Some(12),
+                "\\" => Some(13),
                 _ => None,
             };
             if let Some(l) = level {

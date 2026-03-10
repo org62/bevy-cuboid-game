@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerPhysics,
+    Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{GamePaused, MazePhase, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level4Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::MazeChallenge), setup_maze)
             .add_systems(
-                FixedUpdate,
-                (player_movement, maze_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), maze_playing_update)
                     .chain()
                     .run_if(in_state(MazePhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, maze_visual_update).run_if(in_state(Screen::MazeChallenge)),
+                (animate_player, maze_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::MazeChallenge)),
             )
             .add_systems(
                 Update,
@@ -46,11 +48,6 @@ struct MazeFollowCam;
 struct Trophy;
 
 #[derive(Component)]
-struct FogCube {
-    drift: Vec3,
-}
-
-#[derive(Component)]
 struct BreadcrumbOrb;
 
 #[derive(Component)]
@@ -61,6 +58,12 @@ struct MazeHintCloseButton;
 
 #[derive(Component)]
 struct OverlayScreen;
+
+#[derive(Component)]
+struct WallVisual;
+
+#[derive(Resource, Default)]
+struct WallsVisible(bool);
 
 // --- Constants ---
 
@@ -117,6 +120,7 @@ fn wall_rects() -> Vec<WallRect> {
     ]
 }
 
+#[cfg(test)]
 fn collides_with_walls(x: f32, z: f32, walls: &[WallRect]) -> bool {
     let radius = 0.4;
     for w in walls {
@@ -138,6 +142,7 @@ fn setup_maze(
     scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.08, 0.1, 0.15)));
+    commands.insert_resource(WallsVisible::default());
 
     // Dark green ground
     commands.spawn((
@@ -183,8 +188,27 @@ fn setup_maze(
         MazeEntity,
     ));
 
-    // Invisible wall colliders (no visual geometry)
-    // We don't spawn meshes for them - they exist only in the collision logic
+    // Wall visuals (hidden by default, toggled with ?)
+    let wall_visual_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.4, 0.8, 1.0, 0.35),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+    for wall in &wall_rects() {
+        let w = wall.max.x - wall.min.x;
+        let h = wall.max.y - wall.min.y;
+        let cx = (wall.min.x + wall.max.x) * 0.5;
+        let cz = (wall.min.y + wall.max.y) * 0.5;
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(w, 1.5, h))),
+            MeshMaterial3d(wall_visual_mat.clone()),
+            Transform::from_xyz(cx, 0.75, cz),
+            Visibility::Hidden,
+            WallVisual,
+            MazeEntity,
+        ));
+    }
 
     // Breadcrumb orbs at dead ends
     let dead_end_positions = [
@@ -205,31 +229,6 @@ fn setup_maze(
             MeshMaterial3d(red_orb_mat.clone()),
             Transform::from_translation(*pos),
             BreadcrumbOrb,
-            MazeEntity,
-        ));
-    }
-
-    // Fog cubes
-    let fog_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.8, 0.8, 0.9, 0.12),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
-    });
-    let fog_mesh = meshes.add(Cuboid::new(1.0, 0.8, 1.0));
-    for i in 0..20 {
-        let x = ((i * 7 + 3) % 16) as f32 - 2.0;
-        let z = ((i * 11 + 5) % 14) as f32 - 12.0;
-        let drift = Vec3::new(
-            ((i % 3) as f32 - 1.0) * 0.3,
-            0.0,
-            ((i % 5) as f32 - 2.0) * 0.2,
-        );
-        commands.spawn((
-            Mesh3d(fog_mesh.clone()),
-            MeshMaterial3d(fog_mat.clone()),
-            Transform::from_xyz(x, 0.6, z),
-            FogCube { drift },
             MazeEntity,
         ));
     }
@@ -266,10 +265,15 @@ fn setup_maze(
         },
     ));
 
-    // Camera
+    // Camera with atmospheric fog
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(6.0, 12.0, 8.0).looking_at(Vec3::new(6.0, 0.0, -5.0), Vec3::Y),
+        DistanceFog {
+            color: Color::srgba(0.15, 0.18, 0.25, 1.0),
+            falloff: FogFalloff::Exponential { density: 0.04 },
+            ..default()
+        },
         MazeFollowCam,
         MazeEntity,
     ));
@@ -359,20 +363,29 @@ fn maze_playing_update(
         return;
     };
 
-    // Apply invisible wall collision
+    // Apply invisible wall collision — push player out by minimum penetration
     let walls = wall_rects();
-    if collides_with_walls(pt.translation.x, pt.translation.z, &walls) {
-        // Push player back out of walls
-        // Simple: find the nearest non-colliding position by nudging
-        let step = 0.1;
-        for &(dx, dz) in &[(0.0, step), (0.0, -step), (step, 0.0), (-step, 0.0),
-                           (step, step), (step, -step), (-step, step), (-step, -step)] {
-            let nx = pt.translation.x + dx;
-            let nz = pt.translation.z + dz;
-            if !collides_with_walls(nx, nz, &walls) {
-                pt.translation.x = nx;
-                pt.translation.z = nz;
-                break;
+    let radius = 0.4;
+    for w in &walls {
+        let px = pt.translation.x;
+        let pz = pt.translation.z;
+        if px + radius > w.min.x && px - radius < w.max.x
+            && pz + radius > w.min.y && pz - radius < w.max.y
+        {
+            let pen_left = px + radius - w.min.x;
+            let pen_right = w.max.x - (px - radius);
+            let pen_top = pz + radius - w.min.y;
+            let pen_bottom = w.max.y - (pz - radius);
+            let min_pen = pen_left.min(pen_right).min(pen_top).min(pen_bottom);
+
+            if min_pen == pen_left {
+                pt.translation.x = w.min.x - radius;
+            } else if min_pen == pen_right {
+                pt.translation.x = w.max.x + radius;
+            } else if min_pen == pen_top {
+                pt.translation.z = w.min.y - radius;
+            } else {
+                pt.translation.z = w.max.y + radius;
             }
         }
     }
@@ -390,12 +403,13 @@ fn maze_visual_update(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<MazeFollowCam>, Without<FogCube>, Without<Trophy>)>,
-    mut camera_q: Query<&mut Transform, (With<MazeFollowCam>, Without<Player>, Without<FogCube>, Without<Trophy>)>,
-    mut fog_q: Query<(&mut Transform, &FogCube), (Without<Player>, Without<MazeFollowCam>, Without<Trophy>)>,
-    mut trophy_q: Query<&mut Transform, (With<Trophy>, Without<Player>, Without<MazeFollowCam>, Without<FogCube>)>,
+    player_q: Query<&Transform, (With<Player>, Without<MazeFollowCam>, Without<Trophy>)>,
+    mut camera_q: Query<&mut Transform, (With<MazeFollowCam>, Without<Player>, Without<Trophy>)>,
+    mut trophy_q: Query<&mut Transform, (With<Trophy>, Without<Player>, Without<MazeFollowCam>)>,
     hint_q: Query<Entity, With<MazeHintBox>>,
     btn_q: Query<&Interaction, (Changed<Interaction>, With<MazeHintCloseButton>)>,
+    mut walls_visible: ResMut<WallsVisible>,
+    mut wall_q: Query<&mut Visibility, With<WallVisual>>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
@@ -408,16 +422,21 @@ fn maze_visual_update(
         ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
     }
 
-    // Fog drift
-    for (mut t, fog) in &mut fog_q {
-        t.translation += fog.drift * dt;
-        t.translation.y = 0.6 + (elapsed * 0.5 + t.translation.x).sin() * 0.2;
-    }
-
     // Trophy bob
     for mut t in &mut trophy_q {
         t.translation.y = 1.0 + (elapsed * 1.5).sin() * 0.15;
         t.rotate_y(1.0 * dt);
+    }
+
+    // Toggle wall visibility with ? (Shift + /)
+    if keyboard.just_pressed(KeyCode::Slash) && keyboard.pressed(KeyCode::ShiftLeft)
+        || keyboard.just_pressed(KeyCode::Slash) && keyboard.pressed(KeyCode::ShiftRight)
+    {
+        walls_visible.0 = !walls_visible.0;
+        let vis = if walls_visible.0 { Visibility::Visible } else { Visibility::Hidden };
+        for mut v in &mut wall_q {
+            *v = vis;
+        }
     }
 
     // Hint dismiss

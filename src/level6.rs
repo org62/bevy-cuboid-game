@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerPhysics,
+    Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{ChestPhase, GamePaused, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level6Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::ChestChallenge), setup_chest)
             .add_systems(
-                FixedUpdate,
-                (player_movement, chest_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), chest_playing_update)
                     .chain()
                     .run_if(in_state(ChestPhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, chest_visual_update).run_if(in_state(Screen::ChestChallenge)),
+                (animate_player, chest_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::ChestChallenge)),
             )
             .add_systems(
                 Update,

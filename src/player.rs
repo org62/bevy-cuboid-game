@@ -2,6 +2,9 @@ use bevy::prelude::*;
 
 use crate::GamePaused;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlayerMovementSet;
+
 #[derive(Component)]
 pub struct PauseOverlay;
 
@@ -49,6 +52,20 @@ const GROUND_Y: f32 = 0.0;
 /// Insert this resource to change gravity for a specific level.
 #[derive(Resource)]
 pub struct GravityOverride(pub f32);
+
+/// Optional resource that overrides the default ground Y level.
+/// Insert this resource to allow the player to go below y=0.
+#[derive(Resource)]
+pub struct GroundYOverride(pub f32);
+
+#[derive(Resource)]
+pub struct SpeedBoostMultiplier(pub f32);
+
+#[derive(Resource)]
+pub struct JumpBoostMultiplier(pub f32);
+
+#[derive(Resource)]
+pub struct ReversePlayerFacing;
 
 #[derive(Component)]
 pub struct MovementBounds {
@@ -151,6 +168,10 @@ pub fn player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     gravity_override: Option<Res<GravityOverride>>,
+    ground_y_override: Option<Res<GroundYOverride>>,
+    speed_boost: Option<Res<SpeedBoostMultiplier>>,
+    jump_boost: Option<Res<JumpBoostMultiplier>>,
+    reverse_facing: Option<Res<ReversePlayerFacing>>,
     game_paused: Res<GamePaused>,
     mut query: Query<(&mut Transform, &mut PlayerPhysics, &mut SquashState, &MovementBounds), With<Player>>,
 ) {
@@ -181,12 +202,14 @@ pub fn player_movement(
         input_dir = input_dir.normalize();
     }
 
+    let effective_max_speed = MAX_SPEED * speed_boost.as_ref().map_or(1.0, |b| b.0);
+
     if has_input {
         physics.velocity.x += input_dir.x * ACCELERATION * dt;
         physics.velocity.z += input_dir.z * ACCELERATION * dt;
         let horiz = Vec2::new(physics.velocity.x, physics.velocity.z);
-        if horiz.length() > MAX_SPEED {
-            let c = horiz.normalize() * MAX_SPEED;
+        if horiz.length() > effective_max_speed {
+            let c = horiz.normalize() * effective_max_speed;
             physics.velocity.x = c.x;
             physics.velocity.z = c.y;
         }
@@ -204,12 +227,14 @@ pub fn player_movement(
     }
 
     if keyboard.just_pressed(KeyCode::Space) && physics.grounded {
-        physics.velocity.y = JUMP_VELOCITY;
+        let jump_mult = jump_boost.as_ref().map_or(1.0, |b| b.0);
+        physics.velocity.y = JUMP_VELOCITY * jump_mult;
         physics.grounded = false;
     }
     if !physics.grounded {
         let grav = gravity_override.as_ref().map_or(GRAVITY, |g| g.0);
         physics.velocity.y += grav * dt;
+        physics.velocity.y = physics.velocity.y.max(-20.0);
     }
 
     let was_airborne = !physics.grounded;
@@ -219,8 +244,9 @@ pub fn player_movement(
     transform.translation.x = cx;
     transform.translation.z = cz;
 
-    if transform.translation.y <= GROUND_Y {
-        transform.translation.y = GROUND_Y;
+    let ground_y = ground_y_override.as_ref().map_or(GROUND_Y, |g| g.0);
+    if transform.translation.y <= ground_y {
+        transform.translation.y = ground_y;
         physics.velocity.y = 0.0;
         if was_airborne {
             squash.timer = 0.3;
@@ -228,15 +254,16 @@ pub fn player_movement(
         physics.grounded = true;
     }
 
-    // Face movement direction with slight tilt
+    // Face movement direction with slight tilt (smoothed to avoid flickering)
     let horiz_vel = Vec2::new(physics.velocity.x, physics.velocity.z);
     if horiz_vel.length() > 0.5 {
-        let forward = Vec3::new(horiz_vel.x, 0.0, horiz_vel.y);
-        let target_pos = transform.translation + forward;
-        transform.look_at(target_pos, Vec3::Y);
-        physics.facing = transform.rotation;
+        let forward = Vec3::new(horiz_vel.x, 0.0, horiz_vel.y).normalize();
+        let facing_dir = if reverse_facing.is_some() { -forward } else { forward };
+        let target_rot = Transform::default().looking_to(facing_dir, Vec3::Y).rotation;
+        let turn_speed = (10.0 * dt).min(1.0);
+        physics.facing = physics.facing.slerp(target_rot, turn_speed);
         let tilt = (horiz_vel.length() / MAX_SPEED) * 0.15;
-        transform.rotation *= Quat::from_rotation_x(tilt);
+        transform.rotation = physics.facing * Quat::from_rotation_x(tilt);
     } else {
         transform.rotation = transform.rotation.slerp(physics.facing, (8.0 * dt).min(1.0));
     }

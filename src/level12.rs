@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerPhysics,
+    Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::{FinalPhase, GamePaused, Screen, Scoreboard};
 
@@ -13,14 +13,16 @@ impl Plugin for Level12Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::FinalChallenge), setup_final)
             .add_systems(
-                FixedUpdate,
-                (player_movement, final_playing_update)
+                Update,
+                (player_movement.in_set(PlayerMovementSet), final_playing_update)
                     .chain()
                     .run_if(in_state(FinalPhase::Playing)),
             )
             .add_systems(
                 Update,
-                (animate_player, final_visual_update).run_if(in_state(Screen::FinalChallenge)),
+                (animate_player, final_visual_update)
+                    .after(PlayerMovementSet)
+                    .run_if(in_state(Screen::FinalChallenge)),
             )
             .add_systems(
                 Update,

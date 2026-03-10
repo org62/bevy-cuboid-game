@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use crate::level10::PlayerLoot;
 use crate::level11::CloneData;
 use crate::level12::{FinalState, GuardianNpc, PlayerWeight, QuicksandState, VaultDoor};
+use crate::level13::HillState;
 use crate::level2::PlayerHealth;
 use crate::level3::BombTimer;
 use crate::level5::RacerStats;
@@ -69,6 +70,10 @@ impl Plugin for TestBotPlugin {
             .add_systems(
                 Update,
                 bot_level12.run_if(in_state(Screen::FinalChallenge)),
+            )
+            .add_systems(
+                Update,
+                bot_level13.run_if(in_state(Screen::HillChallenge)),
             );
     }
 }
@@ -116,9 +121,9 @@ impl BotState {
 
     fn next_level(&mut self) {
         self.current_level += 1;
-        if self.current_level > 12 {
+        if self.current_level > 13 {
             self.phase = BotPhase::Done;
-            info!("[TestBot] All 12 levels completed!");
+            info!("[TestBot] All 13 levels completed!");
         } else {
             self.phase = BotPhase::SelectLevel;
             self.timer = 0.5;
@@ -229,13 +234,13 @@ fn bot_menu_system(
     }
 
     // Skip already-solved levels
-    while bot.current_level <= 12 && scoreboard.is_solved(bot.current_level) {
+    while bot.current_level <= 13 && scoreboard.is_solved(bot.current_level) {
         info!("[TestBot] Level {} already solved, skipping", bot.current_level);
         bot.current_level += 1;
     }
     if bot.current_level > 12 {
         bot.phase = BotPhase::Done;
-        info!("[TestBot] All 12 levels completed!");
+        info!("[TestBot] All 13 levels completed!");
         return;
     }
 
@@ -254,6 +259,7 @@ fn bot_menu_system(
         10 => ('0', KeyCode::Digit0),
         11 => ('-', KeyCode::Minus),
         12 => ('=', KeyCode::Equal),
+        13 => ('\\', KeyCode::Backslash),
         _ => return,
     };
 
@@ -578,21 +584,11 @@ fn bot_level5(
             return;
         }
 
-        // Navigate around the oval track using waypoints
-        const NUM_WAYPOINTS: usize = 16;
-        let wp_idx = bot.waypoint % NUM_WAYPOINTS;
-        let progress = wp_idx as f32 / NUM_WAYPOINTS as f32;
-        let angle = progress * std::f32::consts::TAU;
-        let target = Vec3::new(
-            angle.cos() * 10.0,
-            0.0,
-            angle.sin() * 6.0,
-        );
+        // Navigate straight down the track (hold W)
+        let target = Vec3::new(2.5, 0.0, -28.0);
 
         if let Ok(pt) = player_q.get_single() {
-            if navigate_toward(&mut keyboard, pt.translation, target, 2.0) {
-                bot.waypoint += 1;
-            }
+            navigate_toward(&mut keyboard, pt.translation, target, 2.0);
         }
         return;
     }
@@ -1223,6 +1219,70 @@ fn bot_level12(
 
     if bot.phase == BotPhase::WaitForVictory {
         if *final_phase.get() == FinalPhase::Victory {
+            bot.phase = BotPhase::DismissVictory;
+            bot.timer = 0.5;
+        }
+        return;
+    }
+
+    if bot.phase == BotPhase::DismissVictory {
+        bot.timer -= time.delta_secs();
+        if bot.timer <= 0.0 {
+            send_key_press(&mut writer, Key::Enter, KeyCode::Enter);
+            bot.phase = BotPhase::ReturnToMenu;
+            bot.timer = 0.3;
+        }
+        return;
+    }
+
+    if bot.phase == BotPhase::ReturnToMenu {
+        bot.timer -= time.delta_secs();
+        if bot.timer <= 0.0 {
+            keyboard.press(KeyCode::Escape);
+        }
+    }
+}
+
+// ─── Level 13: Hill Fortress (unlock gate + teleport to summit) ───
+
+fn bot_level13(
+    time: Res<Time>,
+    mut bot: ResMut<BotState>,
+    mut keyboard: ResMut<ButtonInput<KeyCode>>,
+    mut writer: EventWriter<KeyboardInput>,
+    mut hill_state: Option<ResMut<HillState>>,
+    mut player_q: Query<&mut Transform, With<Player>>,
+    hill_phase: Res<State<HillPhase>>,
+) {
+    if bot.phase == BotPhase::Done {
+        return;
+    }
+
+    if bot.phase == BotPhase::WaitForLoad {
+        bot.timer -= time.delta_secs();
+        if bot.timer <= 0.0 {
+            bot.phase = BotPhase::ApplyHack;
+        }
+        return;
+    }
+
+    if bot.phase == BotPhase::ApplyHack {
+        if let Some(ref mut hs) = hill_state {
+            info!("[TestBot] Level 13: Setting gate_locked = false");
+            hs.gate_locked = false;
+        }
+        // Teleport player to summit
+        if let Ok(mut pt) = player_q.get_single_mut() {
+            info!("[TestBot] Level 13: Teleporting to summit");
+            pt.translation = Vec3::new(0.0, 10.5, 0.0);
+        }
+        bot.phase = BotPhase::WaitForVictory;
+        bot.timer = 1.0;
+        return;
+    }
+
+    if bot.phase == BotPhase::WaitForVictory {
+        if *hill_phase.get() == HillPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
