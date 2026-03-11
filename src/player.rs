@@ -166,6 +166,7 @@ pub fn spawn_player(
 
 pub fn player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     time: Res<Time>,
     gravity_override: Option<Res<GravityOverride>>,
     ground_y_override: Option<Res<GroundYOverride>>,
@@ -197,6 +198,20 @@ pub fn player_movement(
         input_dir.x += 1.0;
     }
 
+    const DEADZONE: f32 = 0.2;
+    for gamepad in &gamepads {
+        let stick = gamepad.left_stick();
+        if stick.length() > DEADZONE {
+            input_dir.x += stick.x;
+            input_dir.z -= stick.y;
+        }
+        let dpad = gamepad.dpad();
+        if dpad.length() > 0.1 {
+            input_dir.x += dpad.x;
+            input_dir.z -= dpad.y;
+        }
+    }
+
     let has_input = input_dir.length_squared() > 0.0;
     if has_input {
         input_dir = input_dir.normalize();
@@ -226,7 +241,8 @@ pub fn player_movement(
         }
     }
 
-    if keyboard.just_pressed(KeyCode::Space) && physics.grounded {
+    let gamepad_jump = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::South));
+    if (keyboard.just_pressed(KeyCode::Space) || gamepad_jump) && physics.grounded {
         let jump_mult = jump_boost.as_ref().map_or(1.0, |b| b.0);
         physics.velocity.y = JUMP_VELOCITY * jump_mult;
         physics.grounded = false;
@@ -271,24 +287,28 @@ pub fn player_movement(
 
 pub fn escape_to_menu(
     keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     game_paused: Res<GamePaused>,
     mut next_screen: ResMut<NextState<crate::Screen>>,
 ) {
     if game_paused.0 {
         return;
     }
-    if keyboard.just_pressed(KeyCode::Escape) {
+    let gamepad_back = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::Select));
+    if keyboard.just_pressed(KeyCode::Escape) || gamepad_back {
         next_screen.set(crate::Screen::Menu);
     }
 }
 
 pub fn toggle_pause(
     keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut game_paused: ResMut<GamePaused>,
     mut commands: Commands,
     overlay_q: Query<Entity, With<PauseOverlay>>,
 ) {
-    if keyboard.just_pressed(KeyCode::KeyP) {
+    let gamepad_start = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::Start));
+    if keyboard.just_pressed(KeyCode::KeyP) || gamepad_start {
         game_paused.0 = !game_paused.0;
         if game_paused.0 {
             commands
@@ -314,7 +334,7 @@ pub fn toggle_pause(
                         TextColor(Color::srgb(1.0, 1.0, 1.0)),
                     ));
                     parent.spawn((
-                        Text::new("Press P to resume"),
+                        Text::new("Press P or Start to resume"),
                         TextFont { font_size: 22.0, ..default() },
                         TextColor(Color::srgb(0.7, 0.7, 0.7)),
                     ));

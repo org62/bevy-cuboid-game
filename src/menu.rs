@@ -10,7 +10,7 @@ impl Plugin for MenuPlugin {
         app.add_systems(OnEnter(Screen::Menu), setup_menu)
             .add_systems(
                 Update,
-                (menu_keyboard, menu_button_click, menu_button_hover)
+                (menu_keyboard, menu_button_click, menu_button_hover, menu_gamepad)
                     .run_if(in_state(Screen::Menu)),
             )
             .add_systems(OnExit(Screen::Menu), cleanup_menu);
@@ -25,6 +25,13 @@ struct ScoreboardText;
 
 #[derive(Component)]
 struct ChallengeButton(u32);
+
+#[derive(Resource)]
+struct MenuSelection(Option<usize>);
+
+/// Cooldown to prevent stick input from firing every frame.
+#[derive(Resource)]
+struct MenuNavCooldown(f32);
 
 const LEVEL_NAMES: [&str; 13] = [
     "The Password Gate",
@@ -62,6 +69,8 @@ fn screen_for_level(level: u32) -> Option<Screen> {
 }
 
 fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
+    commands.insert_resource(MenuSelection(None));
+    commands.insert_resource(MenuNavCooldown(0.0));
     commands.spawn((Camera2d, MenuScreen));
 
     commands
@@ -170,7 +179,7 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
 
             // Hint
             parent.spawn((
-                Text::new("Press 1-9, 0, -, = or click to start"),
+                Text::new("Press 1-9, 0, -, = or click to start  |  D-pad + A on gamepad"),
                 TextFont {
                     font_size: 16.0,
                     ..default()
@@ -233,16 +242,111 @@ fn menu_button_click(
 
 fn menu_button_hover(
     mut interaction: Query<
-        (&Interaction, &mut BackgroundColor),
+        (&Interaction, &mut BackgroundColor, &ChallengeButton),
         (Changed<Interaction>, With<ChallengeButton>),
     >,
+    selection: Option<Res<MenuSelection>>,
 ) {
-    for (inter, mut bg) in &mut interaction {
+    let sel = selection.and_then(|s| s.0);
+    for (inter, mut bg, btn) in &mut interaction {
+        let is_selected = sel == Some(btn.0 as usize - 1);
         *bg = match *inter {
             Interaction::Hovered => BackgroundColor(Color::srgb(0.3, 0.3, 0.5)),
             Interaction::Pressed => BackgroundColor(Color::srgb(0.4, 0.4, 0.6)),
+            Interaction::None if is_selected => BackgroundColor(Color::srgb(0.3, 0.3, 0.5)),
             Interaction::None => BackgroundColor(Color::srgb(0.2, 0.2, 0.3)),
         };
+    }
+}
+
+const NUM_LEVELS: usize = 13;
+const MENU_COLS: usize = 2;
+
+fn menu_gamepad(
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    mut selection: ResMut<MenuSelection>,
+    mut cooldown: ResMut<MenuNavCooldown>,
+    mut next_state: ResMut<NextState<Screen>>,
+    mut buttons: Query<(&ChallengeButton, &mut BackgroundColor), With<ChallengeButton>>,
+    scoreboard: Res<Scoreboard>,
+) {
+    cooldown.0 = (cooldown.0 - time.delta_secs()).max(0.0);
+
+    let mut dx: i32 = 0;
+    let mut dy: i32 = 0;
+    let mut confirm = false;
+
+    for gamepad in &gamepads {
+        // D-pad (digital, use just_pressed for crisp nav)
+        if gamepad.just_pressed(GamepadButton::DPadUp) {
+            dy -= 1;
+        }
+        if gamepad.just_pressed(GamepadButton::DPadDown) {
+            dy += 1;
+        }
+        if gamepad.just_pressed(GamepadButton::DPadLeft) {
+            dx -= 1;
+        }
+        if gamepad.just_pressed(GamepadButton::DPadRight) {
+            dx += 1;
+        }
+
+        // Left stick (with cooldown)
+        if cooldown.0 <= 0.0 {
+            let stick = gamepad.left_stick();
+            if stick.y > 0.5 {
+                dy -= 1;
+            } else if stick.y < -0.5 {
+                dy += 1;
+            }
+            if stick.x > 0.5 {
+                dx += 1;
+            } else if stick.x < -0.5 {
+                dx -= 1;
+            }
+        }
+
+        if gamepad.just_pressed(GamepadButton::South) {
+            confirm = true;
+        }
+    }
+
+    if dx != 0 || dy != 0 {
+        cooldown.0 = 0.18;
+        let cur = selection.0.unwrap_or(0);
+        let col = cur % MENU_COLS;
+        let row = cur / MENU_COLS;
+
+        let new_col = (col as i32 + dx).clamp(0, (MENU_COLS - 1) as i32) as usize;
+        let new_row = (row as i32 + dy).clamp(0, ((NUM_LEVELS - 1) / MENU_COLS) as i32) as usize;
+        let mut new_idx = new_row * MENU_COLS + new_col;
+        if new_idx >= NUM_LEVELS {
+            new_idx = NUM_LEVELS - 1;
+        }
+        selection.0 = Some(new_idx);
+
+        // Update button colors
+        for (btn, mut bg) in &mut buttons {
+            let idx = btn.0 as usize - 1;
+            let solved = scoreboard.is_solved(btn.0);
+            if idx == new_idx {
+                *bg = BackgroundColor(Color::srgb(0.3, 0.3, 0.5));
+            } else if solved {
+                *bg = BackgroundColor(Color::srgb(0.15, 0.3, 0.15));
+            } else {
+                *bg = BackgroundColor(Color::srgb(0.2, 0.2, 0.3));
+            }
+        }
+    }
+
+    if confirm {
+        if let Some(idx) = selection.0 {
+            let level = idx as u32 + 1;
+            if let Some(screen) = screen_for_level(level) {
+                next_state.set(screen);
+            }
+        }
     }
 }
 
@@ -250,4 +354,6 @@ fn cleanup_menu(mut commands: Commands, query: Query<Entity, With<MenuScreen>>) 
     for entity in &query {
         commands.entity(entity).despawn_recursive();
     }
+    commands.remove_resource::<MenuSelection>();
+    commands.remove_resource::<MenuNavCooldown>();
 }
