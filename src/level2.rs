@@ -586,9 +586,8 @@ fn cannon_visual_update(
 fn handle_victory(
     mut commands: Commands,
     mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<CannonPhase>>,
+    mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    mut player_query: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
     overlay_query: Query<Entity, With<OverlayScreen>>,
     projectile_query: Query<Entity, With<CannonProjectile>>,
 ) {
@@ -623,7 +622,7 @@ fn handle_victory(
                     TextColor(Color::srgb(0.8, 1.0, 0.8)),
                 ));
                 parent.spawn((
-                    Text::new("Press any key to continue"),
+                    Text::new("Press any key to return to menu"),
                     TextFont { font_size: 22.0, ..default() },
                     TextColor(Color::srgb(0.6, 0.8, 0.6)),
                 ));
@@ -635,16 +634,7 @@ fn handle_victory(
 
     for event in events.read() {
         if !event.state.is_pressed() { continue; }
-        for entity in &overlay_query {
-            commands.entity(entity).despawn_recursive();
-        }
-        if let Ok((mut transform, mut physics)) = player_query.get_single_mut() {
-            transform.translation = PLAYER_SPAWN;
-            physics.velocity = Vec3::ZERO;
-            physics.grounded = true;
-            physics.facing = Quat::from_rotation_y(std::f32::consts::PI);
-        }
-        next_phase.set(CannonPhase::Playing);
+        next_screen.set(Screen::Menu);
         return;
     }
 }
