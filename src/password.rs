@@ -292,8 +292,7 @@ fn handle_wrong_password(
 
 fn handle_access_granted(
     mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<ChallengePhase>>,
-    mut player_query: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
+    mut next_screen: ResMut<NextState<Screen>>,
     mut result_query: Query<(&mut Text, &mut TextColor), With<ResultText>>,
 ) {
     // Show access granted text
@@ -306,13 +305,7 @@ fn handle_access_granted(
         if !event.state.is_pressed() {
             continue;
         }
-        if let Ok((mut transform, mut physics)) = player_query.get_single_mut() {
-            transform.translation = PLAYER_PUSHBACK;
-            physics.velocity = Vec3::ZERO;
-            physics.grounded = true;
-            physics.facing = Quat::from_rotation_y(std::f32::consts::PI);
-        }
-        next_phase.set(ChallengePhase::Exploring);
+        next_screen.set(Screen::Menu);
         return;
     }
 }

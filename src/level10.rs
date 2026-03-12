@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet, PlayerPhysics,
+    Player, PlayerMovementSet,
 };
 use crate::{GamePaused, LootPhase, Screen, Scoreboard};
 
@@ -484,9 +484,8 @@ fn loot_visual_update(
 fn handle_victory(
     mut commands: Commands,
     mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<LootPhase>>,
+    mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    mut player_q: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
     overlay_q: Query<Entity, With<OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
@@ -527,12 +526,7 @@ fn handle_victory(
         for entity in &overlay_q {
             commands.entity(entity).despawn_recursive();
         }
-        if let Ok((mut t, mut p)) = player_q.get_single_mut() {
-            t.translation = PLAYER_SPAWN;
-            p.velocity = Vec3::ZERO;
-            p.grounded = true;
-        }
-        next_phase.set(LootPhase::Playing);
+        next_screen.set(Screen::Menu);
         return;
     }
 }

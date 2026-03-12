@@ -697,9 +697,8 @@ fn final_visual_update(
 fn handle_victory(
     mut commands: Commands,
     mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<FinalPhase>>,
+    mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    mut player_q: Query<(&mut Transform, &mut PlayerPhysics, &mut MovementBounds), With<Player>>,
     overlay_q: Query<Entity, With<OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
@@ -745,14 +744,7 @@ fn handle_victory(
         for entity in &overlay_q {
             commands.entity(entity).despawn_recursive();
         }
-        if let Ok((mut t, mut p, mut bounds)) = player_q.get_single_mut() {
-            t.translation = PLAYER_SPAWN;
-            p.velocity = Vec3::ZERO;
-            p.grounded = true;
-            let (bmin, bmax) = room_bounds(0);
-            bounds.rects = vec![(bmin, bmax)];
-        }
-        next_phase.set(FinalPhase::Playing);
+        next_screen.set(Screen::Menu);
         return;
     }
 }

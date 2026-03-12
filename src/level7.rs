@@ -3,7 +3,7 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GravityOverride,
-    MovementBounds, Player, PlayerMovementSet, PlayerPhysics,
+    MovementBounds, Player, PlayerMovementSet,
 };
 use crate::{GamePaused, GravityPhase, Screen, Scoreboard};
 
@@ -437,9 +437,8 @@ fn gravity_visual_update(
 fn handle_victory(
     mut commands: Commands,
     mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<GravityPhase>>,
+    mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    mut player_q: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
     overlay_q: Query<Entity, With<OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
@@ -480,12 +479,7 @@ fn handle_victory(
         for entity in &overlay_q {
             commands.entity(entity).despawn_recursive();
         }
-        if let Ok((mut t, mut p)) = player_q.get_single_mut() {
-            t.translation = PLAYER_SPAWN;
-            p.velocity = Vec3::ZERO;
-            p.grounded = true;
-        }
-        next_phase.set(GravityPhase::Playing);
+        next_screen.set(Screen::Menu);
         return;
     }
 }
