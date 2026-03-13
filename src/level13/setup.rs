@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 
 use crate::player::{
-    spawn_player, GroundYOverride, JumpBoostMultiplier, MovementBounds,
-    ReversePlayerFacing, SpeedBoostMultiplier,
+    spawn_player, GroundYOverride, MovementBounds, PowerUpState,
 };
+use crate::shared_ui;
 use crate::Screen;
 
 use super::components::*;
@@ -21,6 +21,7 @@ pub(super) fn setup_hill(
     commands.insert_resource(ClearColor(Color::srgb(0.45, 0.7, 0.9)));
     commands.insert_resource(HillState::default());
     commands.insert_resource(GroundYOverride(-3.0));
+    commands.insert_resource(PowerUpState::default());
 
     let gray = materials.add(StandardMaterial {
         base_color: Color::srgb(0.5, 0.5, 0.5),
@@ -653,21 +654,14 @@ pub(super) fn setup_hill(
     ));
 
     // --- Lighting ---
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 12000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        12000.0,
+        (-0.8, 0.3, 0.0),
+        Color::WHITE,
+        400.0,
         HillEntity,
-    ));
-
-    // Ambient
-    commands.insert_resource(AmbientLight {
-        color: Color::WHITE,
-        brightness: 400.0,
-    });
+    );
 
     // --- Player ---
     let player = spawn_player(&mut commands, &mut meshes, &mut materials);
@@ -689,7 +683,7 @@ pub(super) fn setup_hill(
             PLAYER_SPAWN.z + CAM_OFFSET.z,
         )
         .looking_at(PLAYER_SPAWN, Vec3::Y),
-        HillFollowCam,
+        shared_ui::FollowCamera { offset: CAM_OFFSET, lerp_speed: 12.0, look_offset: Vec3::ZERO },
         HillEntity,
     ));
 
@@ -723,23 +717,7 @@ pub(super) fn setup_hill(
         });
 
     // Hint text at bottom
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(12.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        HillEntity,
-    )).with_children(|parent| {
-        parent.spawn((
-            Text::new("[ESC] Menu  |  [WASD] Move  |  [Space] Jump  |  [P] Pause"),
-            TextFont { font_size: 14.0, ..default() },
-            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-            HillEntity,
-        ));
-    });
+    shared_ui::spawn_controls_hint(&mut commands, "[ESC] Menu  |  [WASD] Move  |  [Space] Jump  |  [P] Pause", HillEntity);
 
     // --- Power-up apples ---
     let apple_green = materials.add(StandardMaterial {
@@ -1105,43 +1083,17 @@ pub(super) fn handle_victory(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut next_screen: ResMut<NextState<Screen>>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                HillEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("SUMMIT REACHED!"),
-                    TextFont { font_size: 48.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.0)),
-                ));
-                parent.spawn((
-                    Text::new("You conquered the Hill Fortress!"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::WHITE),
-                ));
-                parent.spawn((
-                    Text::new("Press ENTER to return to menu"),
-                    TextFont { font_size: 18.0, ..default() },
-                    TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                ));
-            });
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "SUMMIT REACHED!",
+            Some("You conquered the Hill Fortress!"),
+            22.0,
+            "Press ENTER to return to menu",
+            HillEntity,
+        );
     }
 
     if keyboard.just_pressed(KeyCode::Enter) {
@@ -1159,9 +1111,7 @@ pub(super) fn cleanup_hill(
     commands.remove_resource::<HillState>();
     commands.remove_resource::<GroundYOverride>();
     commands.remove_resource::<ActivePowerUps>();
-    commands.remove_resource::<SpeedBoostMultiplier>();
-    commands.remove_resource::<JumpBoostMultiplier>();
-    commands.remove_resource::<ReversePlayerFacing>();
+    commands.remove_resource::<PowerUpState>();
     commands.remove_resource::<AppleAssets>();
     commands.remove_resource::<AppleRng>();
     commands.remove_resource::<MazeCompleted>();

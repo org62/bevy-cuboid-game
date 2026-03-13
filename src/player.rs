@@ -58,14 +58,12 @@ pub struct GravityOverride(pub f32);
 #[derive(Resource)]
 pub struct GroundYOverride(pub f32);
 
-#[derive(Resource)]
-pub struct SpeedBoostMultiplier(pub f32);
-
-#[derive(Resource)]
-pub struct JumpBoostMultiplier(pub f32);
-
-#[derive(Resource)]
-pub struct ReversePlayerFacing;
+#[derive(Resource, Default)]
+pub struct PowerUpState {
+    pub speed_multiplier: f32,
+    pub jump_multiplier: f32,
+    pub reverse_facing: bool,
+}
 
 #[derive(Component)]
 pub struct MovementBounds {
@@ -170,9 +168,7 @@ pub fn player_movement(
     time: Res<Time>,
     gravity_override: Option<Res<GravityOverride>>,
     ground_y_override: Option<Res<GroundYOverride>>,
-    speed_boost: Option<Res<SpeedBoostMultiplier>>,
-    jump_boost: Option<Res<JumpBoostMultiplier>>,
-    reverse_facing: Option<Res<ReversePlayerFacing>>,
+    power_ups: Option<Res<PowerUpState>>,
     game_paused: Res<GamePaused>,
     mut query: Query<(&mut Transform, &mut PlayerPhysics, &mut SquashState, &MovementBounds), With<Player>>,
 ) {
@@ -217,7 +213,7 @@ pub fn player_movement(
         input_dir = input_dir.normalize();
     }
 
-    let effective_max_speed = MAX_SPEED * speed_boost.as_ref().map_or(1.0, |b| b.0);
+    let effective_max_speed = MAX_SPEED * power_ups.as_ref().map_or(1.0, |p| if p.speed_multiplier > 0.0 { p.speed_multiplier } else { 1.0 });
 
     if has_input {
         physics.velocity.x += input_dir.x * ACCELERATION * dt;
@@ -243,7 +239,7 @@ pub fn player_movement(
 
     let gamepad_jump = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::South));
     if (keyboard.just_pressed(KeyCode::Space) || gamepad_jump) && physics.grounded {
-        let jump_mult = jump_boost.as_ref().map_or(1.0, |b| b.0);
+        let jump_mult = power_ups.as_ref().map_or(1.0, |p| if p.jump_multiplier > 0.0 { p.jump_multiplier } else { 1.0 });
         physics.velocity.y = JUMP_VELOCITY * jump_mult;
         physics.grounded = false;
     }
@@ -274,7 +270,8 @@ pub fn player_movement(
     let horiz_vel = Vec2::new(physics.velocity.x, physics.velocity.z);
     if horiz_vel.length() > 0.5 {
         let forward = Vec3::new(horiz_vel.x, 0.0, horiz_vel.y).normalize();
-        let facing_dir = if reverse_facing.is_some() { -forward } else { forward };
+        let reverse = power_ups.as_ref().map_or(false, |p| p.reverse_facing);
+        let facing_dir = if reverse { -forward } else { forward };
         let target_rot = Transform::default().looking_to(facing_dir, Vec3::Y).rotation;
         let turn_speed = (10.0 * dt).min(1.0);
         physics.facing = physics.facing.slerp(target_rot, turn_speed);

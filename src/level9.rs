@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet, PlayerPhysics,
 };
+use crate::shared_ui;
 use crate::{ArenaPhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level9Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level9Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, arena_visual_update)
+                (animate_player, arena_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::ArenaChallenge)),
             )
@@ -45,9 +46,6 @@ impl Plugin for Level9Plugin {
 #[derive(Component)]
 struct ArenaEntity;
 
-#[derive(Component)]
-struct ArenaFollowCam;
-
 #[repr(C)]
 #[derive(Component)]
 pub(crate) struct Fighter {
@@ -60,15 +58,6 @@ pub(crate) struct Fighter {
 
 #[derive(Component)]
 struct TeamHudText;
-
-#[derive(Component)]
-struct ArenaHintBox;
-
-#[derive(Component)]
-struct ArenaHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 // --- Resources ---
 
@@ -248,24 +237,23 @@ fn setup_arena(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ArenaFollowCam,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 12.0, 12.0),
+            lerp_speed: 8.0,
+            look_offset: Vec3::Y,
+        },
         ArenaEntity,
     ));
 
     // Lighting
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.3, 0.0)),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        10000.0,
+        (-0.7, 0.3, 0.0),
+        Color::srgb(0.9, 0.85, 0.7),
+        400.0,
         ArenaEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.9, 0.85, 0.7),
-        brightness: 400.0,
-    });
+    );
 
     // HUD - team status
     commands
@@ -293,75 +281,20 @@ fn setup_arena(
         });
 
     // Controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            ArenaEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        ArenaEntity,
+    );
 
     // Hint
-    if !scoreboard.arena_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                ArenaHintBox,
-                ArenaEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("The same function damages everyone! Stopping damage causes a draw. Look at the team field on each Fighter when apply_arena_damage() is called."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        ArenaHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(9) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "The same function damages everyone! Stopping damage causes a draw. Look at the team field on each Fighter when apply_arena_damage() is called.",
+            280.0,
+            ArenaEntity,
+        );
     }
 }
 
@@ -430,29 +363,11 @@ fn arena_playing_update(
 
 // --- Visual ---
 
-#[allow(clippy::too_many_arguments)]
 fn arena_visual_update(
-    time: Res<Time>,
     arena_state: Res<ArenaState>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<ArenaFollowCam>)>,
-    mut camera_q: Query<&mut Transform, (With<ArenaFollowCam>, Without<Player>)>,
     fighters: Query<&Fighter>,
     mut text_q: Query<&mut Text, With<TeamHudText>>,
-    hint_q: Query<Entity, With<ArenaHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<ArenaHintCloseButton>)>,
 ) {
-    let dt = time.delta_secs();
-
-    // Camera
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 12.0, 12.0);
-        let t = (6.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(Vec3::ZERO + Vec3::Y, Vec3::Y);
-    }
-
     // HUD
     if let Ok(mut text) = text_q.get_single_mut() {
         let mut blue_hp = 0.0f32;
@@ -466,15 +381,6 @@ fn arena_visual_update(
             blue_hp, red_hp, arena_state.elapsed
         );
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -484,44 +390,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.arena_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                ArenaEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("VICTORY!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(0.2, 1.0, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Your team won the battle!"),
-                    TextFont { font_size: 28.0, ..default() },
-                    TextColor(Color::srgb(0.8, 1.0, 0.8)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(9);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "VICTORY!",
+            Some("Your team won the battle!"),
+            28.0,
+            "Press any key to continue",
+            ArenaEntity,
+        );
     }
 
     for event in events.read() {
@@ -543,7 +423,7 @@ fn handle_lost(
     mut arena_state: ResMut<ArenaState>,
     mut player_q: Query<(&mut Transform, &mut PlayerPhysics), (With<Player>, Without<Fighter>)>,
     mut fighters: Query<&mut Fighter>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
         let reason = if arena_state.elapsed >= arena_state.draw_timeout {
@@ -551,40 +431,16 @@ fn handle_lost(
         } else {
             "Your team was defeated!"
         };
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.2, 0.0, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                ArenaEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("DEFEAT"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.2, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new(reason),
-                    TextFont { font_size: 28.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.6, 0.6)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to retry"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.8, 0.6, 0.6)),
-                ));
-            });
+        shared_ui::spawn_defeat_overlay(
+            &mut commands,
+            "DEFEAT",
+            52.0,
+            Some(reason),
+            28.0,
+            "Press any key to retry",
+            Color::srgba(0.2, 0.0, 0.0, 0.8),
+            ArenaEntity,
+        );
     }
 
     for event in events.read() {

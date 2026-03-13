@@ -11,6 +11,7 @@ mod terrain;
 use bevy::prelude::*;
 
 use crate::player::{animate_player, escape_to_menu, player_movement, toggle_pause, PlayerMovementSet};
+use crate::shared_ui;
 use crate::{HillPhase, Screen};
 
 #[cfg(feature = "test_bot")]
@@ -29,7 +30,7 @@ impl Plugin for Level13Plugin {
         app.add_systems(OnEnter(Screen::HillChallenge), setup_hill)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), terrain_collision, hill_playing_update)
+                (player_movement.in_set(PlayerMovementSet), terrain_collision)
                     .chain()
                     .run_if(in_state(HillPhase::Playing)),
             )
@@ -74,7 +75,7 @@ impl Plugin for Level13Plugin {
             )
             .add_systems(
                 Update,
-                follow_camera
+                shared_ui::follow_camera_system
                     .after(PlayerMovementSet)
                     .after(suck_up_animation_system)
                     .after(zip_line_ride_system)

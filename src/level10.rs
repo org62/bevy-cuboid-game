@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{GamePaused, LootPhase, Screen, Scoreboard};
 
 pub struct Level10Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level10Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, loot_visual_update)
+                (animate_player, loot_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::LootChallenge)),
             )
@@ -42,9 +43,6 @@ impl Plugin for Level10Plugin {
 struct LootEntity;
 
 #[derive(Component)]
-struct LootFollowCam;
-
-#[derive(Component)]
 struct GoblinNpc;
 
 #[derive(Component)]
@@ -53,14 +51,6 @@ struct ExitDoor;
 #[derive(Component)]
 struct LootHudText;
 
-#[derive(Component)]
-struct LootHintBox;
-
-#[derive(Component)]
-struct LootHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 // --- Resources ---
 
@@ -280,7 +270,7 @@ fn setup_loot(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-        LootFollowCam,
+        shared_ui::FollowCamera { offset: Vec3::new(0.0, 10.0, 10.0), lerp_speed: 6.0, look_offset: Vec3::Y },
         LootEntity,
     ));
 
@@ -308,75 +298,16 @@ fn setup_loot(
         });
 
     // Controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            LootEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(&mut commands, "[Esc] Menu | WASD Move | Space Jump | [P] Pause", LootEntity);
 
     // Hint
-    if !scoreboard.loot_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                LootHintBox,
-                LootEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("The goblin's loot is random... or is it? Inspect the LootTable entries to see the weights. The golden key's odds are 1 in 1000."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        LootHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(10) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "The goblin's loot is random... or is it? Inspect the LootTable entries to see the weights. The golden key's odds are 1 in 1000.",
+            280.0,
+            LootEntity,
+        );
     }
 }
 
@@ -427,29 +358,13 @@ fn loot_playing_update(
 
 // --- Visual ---
 
-#[allow(clippy::too_many_arguments)]
 fn loot_visual_update(
     time: Res<Time>,
     player_loot: Res<PlayerLoot>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<LootFollowCam>, Without<GoblinNpc>)>,
-    mut camera_q: Query<&mut Transform, (With<LootFollowCam>, Without<Player>, Without<GoblinNpc>)>,
-    mut goblin_q: Query<&mut Transform, (With<GoblinNpc>, Without<Player>, Without<LootFollowCam>)>,
+    mut goblin_q: Query<&mut Transform, With<GoblinNpc>>,
     mut text_q: Query<&mut Text, With<LootHudText>>,
-    hint_q: Query<Entity, With<LootHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<LootHintCloseButton>)>,
 ) {
-    let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
-
-    // Camera
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 10.0, 10.0);
-        let t = (6.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-    }
 
     // Goblin idle bounce
     for mut t in &mut goblin_q {
@@ -468,15 +383,6 @@ fn loot_visual_update(
         let key_str = if player_loot.has_golden_key { " [KEY]" } else { "" };
         **text = format!("Drops: {} | Last: {}{}", player_loot.total_drops, last_name, key_str);
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -486,39 +392,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.loot_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                LootEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("DOOR UNLOCKED!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(10);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "DOOR UNLOCKED!",
+            None,
+            24.0,
+            "Press any key to continue",
+            LootEntity,
+        );
     }
 
     for event in events.read() {

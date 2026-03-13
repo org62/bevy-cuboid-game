@@ -3,8 +3,9 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet, PlayerPhysics, SpeedBoostMultiplier,
+    Player, PlayerMovementSet, PlayerPhysics, PowerUpState,
 };
+use crate::shared_ui;
 use crate::{GamePaused, RacePhase, Screen, Scoreboard};
 
 pub struct Level5Plugin;
@@ -28,7 +29,7 @@ impl Plugin for Level5Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, race_visual_update)
+                (animate_player, race_visual_update, shared_ui::dismiss_hint)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::RaceChallenge)),
             )
@@ -65,15 +66,6 @@ struct AiRacer {
 
 #[derive(Component)]
 struct RaceHudText;
-
-#[derive(Component)]
-struct RaceHintBox;
-
-#[derive(Component)]
-struct RaceHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 #[derive(Component)]
 struct CountdownText;
@@ -330,19 +322,14 @@ fn setup_race(
     ));
 
     // Light
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.3, 0.0)),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        10000.0,
+        (-0.7, 0.3, 0.0),
+        Color::srgb(0.9, 0.9, 1.0),
+        400.0,
         RaceEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.9, 0.9, 1.0),
-        brightness: 400.0,
-    });
+    );
 
     // HUD
     commands
@@ -368,23 +355,11 @@ fn setup_race(
         });
 
     // Controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            RaceEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        RaceEntity,
+    );
 
     // Countdown overlay
     commands
@@ -411,56 +386,13 @@ fn setup_race(
         });
 
     // Hint
-    if !scoreboard.race_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                RaceHintBox,
-                RaceEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("The race is rigged -- the numbers are stacked against you. A RacerStats resource controls everything: speeds, laps. What if you could rewrite the rules?"),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        RaceHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(5) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "The race is rigged -- the numbers are stacked against you. A RacerStats resource controls everything: speeds, laps. What if you could rewrite the rules?",
+            280.0,
+            RaceEntity,
+        );
     }
 }
 
@@ -533,17 +465,22 @@ fn race_playing_update(
     player_q: Query<&Transform, (With<Player>, Without<AiRacer>)>,
     mut ai_q: Query<(&mut AiRacer, &mut Transform), Without<Player>>,
     game_paused: Res<GamePaused>,
-    existing_boost: Option<Res<SpeedBoostMultiplier>>,
+    mut power_up_state: Option<ResMut<PowerUpState>>,
 ) {
     if game_paused.0 { return; }
 
     // Easter egg: ? key gives 2x speed boost
-    if existing_boost.is_none() {
+    let has_boost = power_up_state.as_ref().map_or(false, |p| p.speed_multiplier > 0.0);
+    if !has_boost {
         for event in key_events.read() {
             if event.state.is_pressed() {
                 if let bevy::input::keyboard::Key::Character(ref ch) = event.logical_key {
                     if ch.as_str() == "?" {
-                        commands.insert_resource(SpeedBoostMultiplier(2.0));
+                        if let Some(ref mut state) = power_up_state {
+                            state.speed_multiplier = 2.0;
+                        } else {
+                            commands.insert_resource(PowerUpState { speed_multiplier: 2.0, ..default() });
+                        }
                         break;
                     }
                 }
@@ -585,22 +522,17 @@ fn race_playing_update(
 
 // --- Visual ---
 
-#[allow(clippy::too_many_arguments)]
 fn race_visual_update(
     time: Res<Time>,
     player_race: Res<PlayerRaceState>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
     player_q: Query<&Transform, (With<Player>, Without<RaceFollowCam>)>,
     mut camera_q: Query<&mut Transform, (With<RaceFollowCam>, Without<Player>)>,
     mut text_q: Query<&mut Text, With<RaceHudText>>,
     ai_q: Query<&AiRacer>,
-    hint_q: Query<Entity, With<RaceHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<RaceHintCloseButton>)>,
 ) {
     let dt = time.delta_secs();
 
-    // Camera follows player from behind and above
+    // Camera follows player from behind and above (race-specific: looks ahead)
     if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
         let target = pt.translation + Vec3::new(0.0, 12.0, 10.0);
         let t = (6.0 * dt).min(1.0);
@@ -625,15 +557,6 @@ fn race_visual_update(
         let pct = (player_race.progress * 100.0).min(100.0) as u32;
         **text = format!("Pos: {} | {}%", pos_str, pct);
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -643,39 +566,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.race_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                RaceEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("YOU WIN THE RACE!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(0.2, 1.0, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(5);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "YOU WIN THE RACE!",
+            None,
+            0.0,
+            "Press any key to continue",
+            RaceEntity,
+        );
     }
 
     for event in events.read() {
@@ -699,43 +601,19 @@ fn handle_lost(
     mut player_race: ResMut<PlayerRaceState>,
     mut player_q: Query<(&mut Transform, &mut PlayerPhysics), (With<Player>, Without<AiRacer>)>,
     mut ai_q: Query<(&mut AiRacer, &mut Transform), Without<Player>>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.2, 0.0, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                RaceEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("YOU LOST!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.2, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("An AI racer finished first!"),
-                    TextFont { font_size: 28.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.6, 0.6)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to retry"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.8, 0.6, 0.6)),
-                ));
-            });
+        shared_ui::spawn_defeat_overlay(
+            &mut commands,
+            "YOU LOST!",
+            52.0,
+            Some("An AI racer finished first!"),
+            28.0,
+            "Press any key to retry",
+            Color::srgba(0.2, 0.0, 0.0, 0.8),
+            RaceEntity,
+        );
     }
 
     for event in events.read() {
@@ -745,7 +623,7 @@ fn handle_lost(
         }
         *stats = RacerStats::default();
         *player_race = PlayerRaceState::default();
-        commands.remove_resource::<SpeedBoostMultiplier>();
+        commands.remove_resource::<PowerUpState>();
         race_seed.0 += 1;
         for (mut ai, mut t) in &mut ai_q {
             ai.progress = 0.0;
@@ -775,7 +653,6 @@ fn cleanup_race(mut commands: Commands, query: Query<Entity, With<RaceEntity>>) 
     for entity in &query {
         commands.entity(entity).despawn_recursive();
     }
-    commands.remove_resource::<SpeedBoostMultiplier>();
 }
 
 #[cfg(test)]

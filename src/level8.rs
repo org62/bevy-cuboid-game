@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{GamePaused, TollPhase, Screen, Scoreboard};
 
 pub struct Level8Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level8Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, toll_visual_update)
+                (animate_player, toll_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::TollChallenge)),
             )
@@ -42,22 +43,10 @@ impl Plugin for Level8Plugin {
 struct TollEntity;
 
 #[derive(Component)]
-struct TollFollowCam;
-
-#[derive(Component)]
 struct TollBooth;
 
 #[derive(Component)]
 struct GoldHudText;
-
-#[derive(Component)]
-struct TollHintBox;
-
-#[derive(Component)]
-struct TollHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 // --- Resources ---
 
@@ -220,10 +209,16 @@ fn setup_toll(
             TollEntity,
         ));
     }
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.5, 0.45, 0.6),
-        brightness: 250.0,
-    });
+
+    // Lighting
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        6000.0,
+        (-0.7, 0.2, 0.0),
+        Color::srgb(0.5, 0.45, 0.6),
+        250.0,
+        TollEntity,
+    );
 
     // Player
     let player = spawn_player(&mut commands, &mut meshes, &mut materials);
@@ -240,18 +235,11 @@ fn setup_toll(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 6.0, 8.0).looking_at(Vec3::new(0.0, 0.0, -3.0), Vec3::Y),
-        TollFollowCam,
-        TollEntity,
-    ));
-
-    // Directional light
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 6000.0,
-            shadows_enabled: true,
-            ..default()
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 10.0, 10.0),
+            lerp_speed: 6.0,
+            look_offset: Vec3::Y,
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.2, 0.0)),
         TollEntity,
     ));
 
@@ -279,75 +267,20 @@ fn setup_toll(
         });
 
     // Controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            TollEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | E to pay | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | E to pay | [P] Pause",
+        TollEntity,
+    );
 
     // Hint
-    if !scoreboard.toll_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                TollHintBox,
-                TollEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("The toll keeper's price grows tenfold! Step through compute_toll() to understand the formula, then make yourself wealthy."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        TollHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(8) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "The toll keeper's price grows tenfold! Step through compute_toll() to understand the formula, then make yourself wealthy.",
+            280.0,
+            TollEntity,
+        );
     }
 }
 
@@ -392,40 +325,13 @@ fn toll_playing_update(
 
 // --- Visual ---
 
-#[allow(clippy::too_many_arguments)]
 fn toll_visual_update(
-    time: Res<Time>,
     wallet: Res<PlayerWallet>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<TollFollowCam>)>,
-    mut camera_q: Query<&mut Transform, (With<TollFollowCam>, Without<Player>)>,
     mut text_q: Query<&mut Text, With<GoldHudText>>,
-    hint_q: Query<Entity, With<TollHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<TollHintCloseButton>)>,
 ) {
-    let dt = time.delta_secs();
-
-    // Camera
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 6.0, 8.0);
-        let t = (6.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-    }
-
     // HUD
     if let Ok(mut text) = text_q.get_single_mut() {
         **text = format!("Gold: {}", wallet.gold);
-    }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
     }
 }
 
@@ -436,39 +342,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.toll_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                TollEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("BRIDGE CROSSED!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(8);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "BRIDGE CROSSED!",
+            None,
+            28.0,
+            "Press any key to continue",
+            TollEntity,
+        );
     }
 
     for event in events.read() {

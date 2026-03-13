@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet, PlayerPhysics,
 };
+use crate::shared_ui;
 use crate::{CountdownPhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level3Plugin;
@@ -20,7 +21,12 @@ impl Plugin for Level3Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, countdown_visual_update)
+                (
+                    animate_player,
+                    countdown_visual_update,
+                    shared_ui::follow_camera_system,
+                    shared_ui::dismiss_hint,
+                )
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::CountdownChallenge)),
             )
@@ -46,9 +52,6 @@ impl Plugin for Level3Plugin {
 struct CountdownEntity;
 
 #[derive(Component)]
-struct CountdownFollowCam;
-
-#[derive(Component)]
 struct TimerHudText;
 
 #[derive(Component)]
@@ -56,15 +59,6 @@ struct TimeCrystal;
 
 #[derive(Component)]
 struct BombVisual;
-
-#[derive(Component)]
-struct CountdownHintBox;
-
-#[derive(Component)]
-struct CountdownHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 // --- Resources ---
 
@@ -208,29 +202,23 @@ fn setup_countdown(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 10.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
-        CountdownFollowCam,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 10.0, 12.0),
+            lerp_speed: 8.0,
+            look_offset: Vec3::Y,
+        },
         CountdownEntity,
     ));
 
     // Lighting
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 5000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(
-            EulerRot::XYZ,
-            -std::f32::consts::FRAC_PI_4,
-            std::f32::consts::FRAC_PI_6,
-            0.0,
-        )),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        5000.0,
+        (-std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_6, 0.0),
+        Color::srgb(0.9, 0.7, 0.5),
+        200.0,
         CountdownEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.9, 0.7, 0.5),
-        brightness: 200.0,
-    });
+    );
 
     // Orange glow cracks (point lights on floor)
     for pos in [
@@ -277,92 +265,20 @@ fn setup_countdown(
         });
 
     // HUD - controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            CountdownEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont {
-                    font_size: 20.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        CountdownEntity,
+    );
 
     // HUD - hint box
-    if !scoreboard.countdown_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                CountdownHintBox,
-                CountdownEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont {
-                        font_size: 20.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node {
-                        max_width: Val::Px(250.0),
-                        ..default()
-                    },
-                    Text::new(
-                        "The bomb is ticking... Can you stop time itself? Examine tick_bomb_timer() in the debugger.",
-                    ),
-                    TextFont {
-                        font_size: 16.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        CountdownHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont {
-                                font_size: 14.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(3) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "The bomb is ticking... Can you stop time itself? Examine tick_bomb_timer() in the debugger.",
+            280.0,
+            CountdownEntity,
+        );
     }
 }
 
@@ -408,32 +324,14 @@ fn countdown_playing_update(
 
 // --- Visual update ---
 
-#[allow(clippy::too_many_arguments)]
 fn countdown_visual_update(
     time: Res<Time>,
     bomb: Res<BombTimer>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<CountdownFollowCam>)>,
-    mut camera_q: Query<
-        &mut Transform,
-        (With<CountdownFollowCam>, Without<Player>),
-    >,
     mut text_q: Query<(&mut Text, &mut TextColor), With<TimerHudText>>,
-    hint_q: Query<Entity, With<CountdownHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<CountdownHintCloseButton>)>,
-    mut crystal_q: Query<&mut Transform, (With<TimeCrystal>, Without<Player>, Without<CountdownFollowCam>)>,
+    mut crystal_q: Query<&mut Transform, With<TimeCrystal>>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
-
-    // Camera follow
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 10.0, 12.0);
-        let t = (8.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-    }
 
     // Timer HUD
     if let Ok((mut text, mut color)) = text_q.get_single_mut() {
@@ -451,15 +349,6 @@ fn countdown_visual_update(
         t.rotate_y(2.0 * dt);
         t.translation.y = 1.1 + (elapsed * 2.0 + t.translation.x).sin() * 0.15;
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -469,39 +358,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.countdown_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                CountdownEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("BOMB DEFUSED!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(0.2, 1.0, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(3);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "BOMB DEFUSED!",
+            None,
+            0.0,
+            "Press any key to continue",
+            CountdownEntity,
+        );
     }
 
     for event in events.read() {
@@ -522,43 +390,19 @@ fn handle_exploded(
     mut next_phase: ResMut<NextState<CountdownPhase>>,
     mut bomb: ResMut<BombTimer>,
     mut player_q: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.3, 0.05, 0.0, 0.85)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                CountdownEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("BOOM!"),
-                    TextFont { font_size: 64.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.3, 0.1)),
-                ));
-                parent.spawn((
-                    Text::new("The bomb exploded!"),
-                    TextFont { font_size: 28.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.6, 0.4)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to retry"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.8, 0.6, 0.6)),
-                ));
-            });
+        shared_ui::spawn_defeat_overlay(
+            &mut commands,
+            "BOOM!",
+            64.0,
+            Some("The bomb exploded!"),
+            28.0,
+            "Press any key to retry",
+            Color::srgba(0.3, 0.05, 0.0, 0.85),
+            CountdownEntity,
+        );
     }
 
     for event in events.read() {

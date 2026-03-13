@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet, PlayerPhysics,
 };
+use crate::shared_ui;
 use crate::{CannonPhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level2Plugin;
@@ -20,7 +21,12 @@ impl Plugin for Level2Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, cannon_visual_update)
+                (
+                    animate_player,
+                    cannon_visual_update,
+                    shared_ui::follow_camera_system,
+                    shared_ui::dismiss_hint,
+                )
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::CannonChallenge)),
             )
@@ -46,9 +52,6 @@ impl Plugin for Level2Plugin {
 struct CannonEntity;
 
 #[derive(Component)]
-struct CannonFollowCam;
-
-#[derive(Component)]
 struct CannonPivot;
 
 #[derive(Component)]
@@ -64,15 +67,6 @@ struct HealthCube {
 
 #[derive(Component)]
 struct HealthHudText;
-
-#[derive(Component)]
-struct CannonHintBox;
-
-#[derive(Component)]
-struct CannonHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 #[derive(Component)]
 struct HurtFlash;
@@ -227,29 +221,23 @@ fn setup_cannon_arena(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 8.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-        CannonFollowCam,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 8.0, 10.0),
+            lerp_speed: 8.0,
+            look_offset: Vec3::Y,
+        },
         CannonEntity,
     ));
 
     // Light
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(
-            EulerRot::XYZ,
-            -std::f32::consts::FRAC_PI_4,
-            std::f32::consts::FRAC_PI_6,
-            0.0,
-        )),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        10000.0,
+        (-std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_6, 0.0),
+        Color::srgb(0.9, 0.85, 0.8),
+        350.0,
         CannonEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.9, 0.85, 0.8),
-        brightness: 350.0,
-    });
+    );
 
     // Health cubes (green)
     spawn_health_cubes(&mut commands, &mut meshes, &mut materials);
@@ -292,75 +280,20 @@ fn setup_cannon_arena(
         });
 
     // HUD - controls hint
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            CannonEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        CannonEntity,
+    );
 
     // HUD - hint box
-    if !scoreboard.cannon_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(260.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                CannonHintBox,
-                CannonEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(230.0), ..default() },
-                    Text::new("To win, you need 1000 points of health."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        CannonHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(2) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "To win, you need 1000 points of health.",
+            260.0,
+            CannonEntity,
+        );
     }
 }
 
@@ -515,27 +448,11 @@ fn cannon_playing_update(
 
 // --- Single combined visual system (runs during Screen::CannonChallenge) ---
 
-#[allow(clippy::too_many_arguments)]
 fn cannon_visual_update(
     time: Res<Time>,
     health: Res<PlayerHealth>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<
-        &Transform,
-        (With<Player>, Without<CannonFollowCam>, Without<HealthCube>),
-    >,
-    mut camera_q: Query<
-        &mut Transform,
-        (With<CannonFollowCam>, Without<Player>, Without<HealthCube>),
-    >,
-    mut cube_q: Query<
-        &mut Transform,
-        (With<HealthCube>, Without<Player>, Without<CannonFollowCam>),
-    >,
+    mut cube_q: Query<&mut Transform, With<HealthCube>>,
     mut text_q: Query<&mut Text, With<HealthHudText>>,
-    hint_q: Query<Entity, With<CannonHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<CannonHintCloseButton>)>,
     mut hurt_flash: ResMut<HurtFlashState>,
     mut flash_q: Query<&mut BackgroundColor, With<HurtFlash>>,
 ) {
@@ -551,15 +468,6 @@ fn cannon_visual_update(
         }
     }
 
-    // Camera follow
-    let player_pos = player_q.get_single().map(|t| t.translation).ok();
-    if let (Some(pp), Ok(mut ct)) = (player_pos, camera_q.get_single_mut()) {
-        let target_pos = pp + Vec3::new(0.0, 8.0, 10.0);
-        let t = (8.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target_pos, t);
-        ct.look_at(pp + Vec3::Y, Vec3::Y);
-    }
-
     // Cube animation
     for mut t in &mut cube_q {
         t.rotate_y(2.0 * dt);
@@ -570,15 +478,6 @@ fn cannon_visual_update(
     if let Ok(mut text) = text_q.get_single_mut() {
         **text = format!("HP: {}", health.current);
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory overlay ---
@@ -588,45 +487,19 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_query: Query<Entity, With<OverlayScreen>>,
+    overlay_query: Query<Entity, With<shared_ui::OverlayScreen>>,
     projectile_query: Query<Entity, With<CannonProjectile>>,
 ) {
     if overlay_query.is_empty() {
-        scoreboard.cannon_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                CannonEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("VICTORY!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(0.2, 1.0, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("HP reached 1000!"),
-                    TextFont { font_size: 30.0, ..default() },
-                    TextColor(Color::srgb(0.8, 1.0, 0.8)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to return to menu"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(2);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "VICTORY!",
+            Some("HP reached 1000!"),
+            30.0,
+            "Press any key to return to menu",
+            CannonEntity,
+        );
         for entity in &projectile_query {
             commands.entity(entity).despawn_recursive();
         }
@@ -647,39 +520,20 @@ fn handle_death(
     mut next_phase: ResMut<NextState<CannonPhase>>,
     mut health: ResMut<PlayerHealth>,
     mut player_query: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
-    overlay_query: Query<Entity, With<OverlayScreen>>,
+    overlay_query: Query<Entity, With<shared_ui::OverlayScreen>>,
     projectile_query: Query<Entity, With<CannonProjectile>>,
 ) {
     if overlay_query.is_empty() {
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.2, 0.0, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                CannonEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("YOU DIED"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.2, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to retry"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.8, 0.6, 0.6)),
-                ));
-            });
+        shared_ui::spawn_defeat_overlay(
+            &mut commands,
+            "YOU DIED",
+            52.0,
+            None,
+            0.0,
+            "Press any key to retry",
+            Color::srgba(0.2, 0.0, 0.0, 0.8),
+            CannonEntity,
+        );
         for entity in &projectile_query {
             commands.entity(entity).despawn_recursive();
         }

@@ -1,8 +1,6 @@
 use bevy::prelude::*;
 
-use crate::player::{
-    JumpBoostMultiplier, Player, ReversePlayerFacing, SpeedBoostMultiplier,
-};
+use crate::player::{Player, PowerUpState};
 
 use super::components::*;
 use super::constants::PICKUP_RADIUS;
@@ -58,30 +56,30 @@ pub(super) fn apple_collection_system(
     player_q: Query<&Transform, With<Player>>,
     apple_q: Query<(Entity, &Transform, &PowerUpApple), Without<Player>>,
     mut power_ups: ResMut<ActivePowerUps>,
+    power_up_state: Option<ResMut<PowerUpState>>,
 ) {
     let Ok(player_tf) = player_q.get_single() else { return };
     let pp = player_tf.translation;
 
+    let mut any_collected = false;
     for (entity, apple_tf, apple) in &apple_q {
         let dist = pp.distance(apple_tf.translation);
         if dist < PICKUP_RADIUS {
             commands.entity(entity).despawn_recursive();
             match apple.kind {
-                AppleKind::Speed => {
-                    commands.insert_resource(SpeedBoostMultiplier(2.0));
-                    power_ups.speed_timer = 60.0;
-                }
-                AppleKind::Jump => {
-                    commands.insert_resource(JumpBoostMultiplier(2.0));
-                    power_ups.jump_timer = 60.0;
-                }
-                AppleKind::Backwards => {
-                    commands.insert_resource(ReversePlayerFacing);
-                    power_ups.backwards_timer = 60.0;
-                }
+                AppleKind::Speed => power_ups.speed_timer = 60.0,
+                AppleKind::Jump => power_ups.jump_timer = 60.0,
+                AppleKind::Backwards => power_ups.backwards_timer = 60.0,
             }
-            // Queue respawn after 60 seconds at a new random position
             power_ups.respawn_timers.push((apple.kind, 60.0));
+            any_collected = true;
+        }
+    }
+    if any_collected {
+        if let Some(mut state) = power_up_state {
+            state.speed_multiplier = if power_ups.speed_timer > 0.0 { 2.0 } else { 0.0 };
+            state.jump_multiplier = if power_ups.jump_timer > 0.0 { 2.0 } else { 0.0 };
+            state.reverse_facing = power_ups.backwards_timer > 0.0;
         }
     }
 }
@@ -92,25 +90,28 @@ pub(super) fn power_up_timer_system(
     mut power_ups: ResMut<ActivePowerUps>,
     apple_assets: Option<Res<AppleAssets>>,
     mut apple_rng: ResMut<AppleRng>,
+    power_up_state: Option<ResMut<PowerUpState>>,
 ) {
     let dt = time.delta_secs();
+    let mut changed = false;
 
     if power_ups.speed_timer > 0.0 {
         power_ups.speed_timer = (power_ups.speed_timer - dt).max(0.0);
-        if power_ups.speed_timer == 0.0 {
-            commands.remove_resource::<SpeedBoostMultiplier>();
-        }
+        if power_ups.speed_timer == 0.0 { changed = true; }
     }
     if power_ups.jump_timer > 0.0 {
         power_ups.jump_timer = (power_ups.jump_timer - dt).max(0.0);
-        if power_ups.jump_timer == 0.0 {
-            commands.remove_resource::<JumpBoostMultiplier>();
-        }
+        if power_ups.jump_timer == 0.0 { changed = true; }
     }
     if power_ups.backwards_timer > 0.0 {
         power_ups.backwards_timer = (power_ups.backwards_timer - dt).max(0.0);
-        if power_ups.backwards_timer == 0.0 {
-            commands.remove_resource::<ReversePlayerFacing>();
+        if power_ups.backwards_timer == 0.0 { changed = true; }
+    }
+    if changed {
+        if let Some(mut state) = power_up_state {
+            state.speed_multiplier = if power_ups.speed_timer > 0.0 { 2.0 } else { 0.0 };
+            state.jump_multiplier = if power_ups.jump_timer > 0.0 { 2.0 } else { 0.0 };
+            state.reverse_facing = power_ups.backwards_timer > 0.0;
         }
     }
 

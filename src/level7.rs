@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GravityOverride,
     MovementBounds, Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{GamePaused, GravityPhase, Screen, Scoreboard};
 
 pub struct Level7Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level7Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, gravity_visual_update)
+                (animate_player, gravity_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::GravityChallenge)),
             )
@@ -42,9 +43,6 @@ impl Plugin for Level7Plugin {
 struct GravityEntity;
 
 #[derive(Component)]
-struct GravityFollowCam;
-
-#[derive(Component)]
 struct PlatformBlock;
 
 #[derive(Component)]
@@ -52,15 +50,6 @@ struct GoldenStar;
 
 #[derive(Component)]
 struct HeightHudText;
-
-#[derive(Component)]
-struct GravityHintBox;
-
-#[derive(Component)]
-struct GravityHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 // --- Resources ---
 
@@ -236,24 +225,23 @@ fn setup_gravity(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 8.0, 10.0).looking_at(Vec3::new(0.0, 3.0, 0.0), Vec3::Y),
-        GravityFollowCam,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 8.0, 8.0),
+            lerp_speed: 6.0,
+            look_offset: Vec3::new(0.0, 2.0, 0.0),
+        },
         GravityEntity,
     ));
 
     // Lighting
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 5000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        5000.0,
+        (-0.8, 0.3, 0.0),
+        Color::srgb(0.55, 0.45, 0.65),
+        300.0,
         GravityEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.55, 0.45, 0.65),
-        brightness: 300.0,
-    });
+    );
 
     // HUD - height indicator
     commands
@@ -279,75 +267,20 @@ fn setup_gravity(
         });
 
     // Controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            GravityEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        GravityEntity,
+    );
 
     // Hint
-    if !scoreboard.gravity_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                GravityHintBox,
-                GravityEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("Gravity keeps betraying you! The flip is controlled by compute_gravity_direction(). What if gravity always went... your way?"),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        GravityHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(7) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "Gravity keeps betraying you! The flip is controlled by compute_gravity_direction(). What if gravity always went... your way?",
+            280.0,
+            GravityEntity,
+        );
     }
 }
 
@@ -389,25 +322,12 @@ fn gravity_playing_update(
 fn gravity_visual_update(
     time: Res<Time>,
     _gravity_state: Res<GravityState>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<GravityFollowCam>, Without<GoldenStar>)>,
-    mut camera_q: Query<&mut Transform, (With<GravityFollowCam>, Without<Player>, Without<GoldenStar>)>,
+    player_q: Query<&Transform, (With<Player>, Without<GoldenStar>)>,
     mut text_q: Query<&mut Text, With<HeightHudText>>,
-    mut star_q: Query<&mut Transform, (With<GoldenStar>, Without<Player>, Without<GravityFollowCam>)>,
-    hint_q: Query<Entity, With<GravityHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<GravityHintCloseButton>)>,
+    mut star_q: Query<&mut Transform, (With<GoldenStar>, Without<Player>)>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
-
-    // Camera follow (tracks player Y too)
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 8.0, 10.0);
-        let t = (6.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y * 2.0, Vec3::Y);
-    }
 
     // HUD
     if let Ok(pt) = player_q.get_single() {
@@ -421,15 +341,6 @@ fn gravity_visual_update(
         t.translation.y = 31.0 + (elapsed * 1.5).sin() * 0.2;
         t.rotate_y(1.5 * dt);
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -439,39 +350,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.gravity_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                GravityEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("REACHED THE TOP!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(7);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "REACHED THE TOP!",
+            None,
+            28.0,
+            "Press any key to continue",
+            GravityEntity,
+        );
     }
 
     for event in events.read() {

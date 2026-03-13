@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{ClonePhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level11Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level11Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, clone_visual_update)
+                (animate_player, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::CloneChallenge)),
             )
@@ -42,9 +43,6 @@ impl Plugin for Level11Plugin {
 struct CloneEntity;
 
 #[derive(Component)]
-struct CloneFollowCam;
-
-#[derive(Component)]
 struct DarkClone;
 
 #[repr(C)]
@@ -62,14 +60,6 @@ struct TrapZoneVisual;
 #[derive(Component)]
 struct MirrorWall;
 
-#[derive(Component)]
-struct CloneHintBox;
-
-#[derive(Component)]
-struct CloneHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 // --- Constants ---
 
@@ -217,95 +207,31 @@ fn setup_clone(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
-        CloneFollowCam,
+        shared_ui::FollowCamera { offset: Vec3::new(0.0, 8.0, 8.0), lerp_speed: 8.0, look_offset: Vec3::Y },
         CloneEntity,
     ));
 
     // Lighting
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 6000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.3, 0.0)),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        6000.0,
+        (-0.7, 0.3, 0.0),
+        Color::srgb(0.6, 0.6, 0.7),
+        200.0,
         CloneEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.6, 0.6, 0.7),
-        brightness: 200.0,
-    });
+    );
 
     // HUD
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            CloneEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(&mut commands, "[Esc] Menu | WASD Move | Space Jump | [P] Pause", CloneEntity);
 
     // Hint
-    if !scoreboard.clone_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                CloneHintBox,
-                CloneEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("Your shadow cannot be harmed... or can it? When the clone enters the red zone, something blocks the trap. Break on check_clone_trapped()."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        CloneHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(11) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "Your shadow cannot be harmed... or can it? When the clone enters the red zone, something blocks the trap. Break on check_clone_trapped().",
+            280.0,
+            CloneEntity,
+        );
     }
 }
 
@@ -333,39 +259,6 @@ fn clone_playing_update(
     }
 }
 
-// --- Visual ---
-
-#[allow(clippy::too_many_arguments)]
-fn clone_visual_update(
-    time: Res<Time>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<CloneFollowCam>)>,
-    mut camera_q: Query<&mut Transform, (With<CloneFollowCam>, Without<Player>)>,
-    hint_q: Query<Entity, With<CloneHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<CloneHintCloseButton>)>,
-) {
-    let dt = time.delta_secs();
-
-    // Camera - follow player X slightly to keep them in view
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let follow_x = pt.translation.x * 0.3; // subtle X tracking
-        let target = Vec3::new(follow_x, 12.0, 12.0);
-        let t = (4.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(Vec3::new(follow_x, 0.0, 0.0), Vec3::Y);
-    }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
-}
-
 // --- Victory ---
 
 fn handle_victory(
@@ -373,39 +266,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.clone_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                CloneEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("CLONE TRAPPED!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(0.2, 1.0, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(11);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "CLONE TRAPPED!",
+            None,
+            24.0,
+            "Press any key to continue",
+            CloneEntity,
+        );
     }
 
     for event in events.read() {

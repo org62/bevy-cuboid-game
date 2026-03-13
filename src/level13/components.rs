@@ -4,12 +4,6 @@ use bevy::prelude::*;
 pub(super) struct HillEntity;
 
 #[derive(Component)]
-pub(super) struct HillFollowCam;
-
-#[derive(Component)]
-pub(super) struct OverlayScreen;
-
-#[derive(Component)]
 pub(super) struct HudText;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

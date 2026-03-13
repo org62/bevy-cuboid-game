@@ -4,6 +4,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{ChallengePhase, GamePaused, Screen, Scoreboard};
 
 const ALLOWED_MIN: Vec2 = Vec2::new(-6.0, -5.0);
@@ -29,12 +30,12 @@ impl Plugin for Level1Plugin {
             .add_systems(
                 Update,
                 (
-                    follow_camera,
+                    shared_ui::follow_camera_system,
                     animate_player,
                     animate_barriers,
                     update_stars,
                     rotate_orb,
-                    dismiss_hint,
+                    shared_ui::dismiss_hint,
                 )
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::PasswordChallenge)),
@@ -49,9 +50,6 @@ impl Plugin for Level1Plugin {
 pub struct WorldEntity;
 
 #[derive(Component)]
-struct FollowCamera;
-
-#[derive(Component)]
 struct Barrier;
 
 #[derive(Component)]
@@ -62,12 +60,6 @@ struct StarScoreText;
 
 #[derive(Component)]
 struct PurpleOrb;
-
-#[derive(Component)]
-struct HintBox;
-
-#[derive(Component)]
-struct HintCloseButton;
 
 // --- Resources ---
 
@@ -96,8 +88,8 @@ fn setup_world(
     commands.insert_resource(ClearColor(Color::srgb(0.55, 0.75, 0.95)));
     commands.insert_resource(StarScore::default());
     commands.insert_resource(BarrierState {
-        lowered: scoreboard.password_solved,
-        offset_y: if scoreboard.password_solved { -1.5 } else { 0.0 },
+        lowered: scoreboard.is_solved(1),
+        offset_y: if scoreboard.is_solved(1) { -1.5 } else { 0.0 },
     });
 
     // Main ground (pastel green)
@@ -112,7 +104,7 @@ fn setup_world(
     ));
 
     // Restricted zone ground
-    let zone_color = if scoreboard.password_solved {
+    let zone_color = if scoreboard.is_solved(1) {
         Color::srgb(0.35, 0.7, 0.35)
     } else {
         Color::srgb(0.7, 0.25, 0.2)
@@ -142,7 +134,11 @@ fn setup_world(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 8.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
-        FollowCamera,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 8.0, 8.0),
+            lerp_speed: 8.0,
+            look_offset: Vec3::Y,
+        },
         WorldEntity,
     ));
 
@@ -159,27 +155,15 @@ fn setup_world(
         WorldEntity,
     ));
 
-    // Directional light with shadows
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(
-            EulerRot::XYZ,
-            -std::f32::consts::FRAC_PI_4,
-            std::f32::consts::FRAC_PI_6,
-            0.0,
-        )),
+    // Lighting
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        10000.0,
+        (-std::f32::consts::FRAC_PI_4, std::f32::consts::FRAC_PI_6, 0.0),
+        Color::srgb(0.95, 0.9, 0.8),
+        400.0,
         WorldEntity,
-    ));
-
-    // Warm ambient light
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.95, 0.9, 0.8),
-        brightness: 400.0,
-    });
+    );
 
     // Environment
     spawn_trees(&mut commands, &mut meshes, &mut materials);
@@ -189,91 +173,20 @@ fn setup_world(
     spawn_stars(&mut commands, &mut meshes, &mut materials);
 
     // HUD - controls hint
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            WorldEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont {
-                    font_size: 20.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        WorldEntity,
+    );
 
     // HUD - debugger hint box (top right, dismissible)
-    if !scoreboard.password_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(260.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                HintBox,
-                WorldEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont {
-                        font_size: 20.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node {
-                        max_width: Val::Px(230.0),
-                        ..default()
-                    },
-                    Text::new("Use the debugger to find the password!"),
-                    TextFont {
-                        font_size: 16.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                // Close button
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        HintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont {
-                                font_size: 14.0,
-                                ..default()
-                            },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(1) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "Use the debugger to find the password!",
+            260.0,
+            WorldEntity,
+        );
     }
 
     // HUD - star counter (pill-shaped yellow badge)
@@ -383,7 +296,7 @@ fn spawn_barriers(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     scoreboard: &Res<Scoreboard>,
 ) {
-    if scoreboard.password_solved {
+    if scoreboard.is_solved(1) {
         return;
     }
 
@@ -503,7 +416,7 @@ fn detect_zone(
     if game_paused.0 {
         return;
     }
-    if scoreboard.password_solved {
+    if scoreboard.is_solved(1) {
         return;
     }
     let Ok(transform) = player_query.get_single() else {
@@ -517,23 +430,6 @@ fn detect_zone(
     }
 }
 
-fn follow_camera(
-    player_query: Query<&Transform, (With<Player>, Without<FollowCamera>)>,
-    mut camera_query: Query<&mut Transform, (With<FollowCamera>, Without<Player>)>,
-    time: Res<Time>,
-) {
-    let Ok(pt) = player_query.get_single() else {
-        return;
-    };
-    let Ok(mut ct) = camera_query.get_single_mut() else {
-        return;
-    };
-    let target_pos = pt.translation + Vec3::new(0.0, 8.0, 8.0);
-    let t = (8.0 * time.delta_secs()).min(1.0);
-    ct.translation = ct.translation.lerp(target_pos, t);
-    ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-}
-
 fn animate_barriers(
     mut barrier_state: ResMut<BarrierState>,
     scoreboard: Res<Scoreboard>,
@@ -542,7 +438,7 @@ fn animate_barriers(
     mut materials: ResMut<Assets<StandardMaterial>>,
     zone_mat: Res<ZoneGroundMaterial>,
 ) {
-    if !scoreboard.password_solved || barrier_state.lowered {
+    if !scoreboard.is_solved(1) || barrier_state.lowered {
         return;
     }
 
@@ -606,24 +502,6 @@ fn rotate_orb(time: Res<Time>, mut query: Query<&mut Transform, With<PurpleOrb>>
     for mut t in &mut query {
         t.rotate_y(1.5 * time.delta_secs());
         t.translation.y = 1.15 + (time.elapsed_secs() * 1.5).sin() * 0.1;
-    }
-}
-
-fn dismiss_hint(
-    mut commands: Commands,
-    hint_query: Query<Entity, With<HintBox>>,
-    button_query: Query<&Interaction, (Changed<Interaction>, With<HintCloseButton>)>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-) {
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || button_query
-            .iter()
-            .any(|i| *i == Interaction::Pressed);
-
-    if should_close {
-        for entity in &hint_query {
-            commands.entity(entity).despawn_recursive();
-        }
     }
 }
 

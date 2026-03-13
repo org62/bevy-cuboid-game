@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{GamePaused, MazePhase, Screen, Scoreboard};
 
 pub struct Level4Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level4Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, maze_visual_update)
+                (animate_player, maze_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::MazeChallenge)),
             )
@@ -42,22 +43,10 @@ impl Plugin for Level4Plugin {
 struct MazeEntity;
 
 #[derive(Component)]
-struct MazeFollowCam;
-
-#[derive(Component)]
 struct Trophy;
 
 #[derive(Component)]
 struct BreadcrumbOrb;
-
-#[derive(Component)]
-struct MazeHintBox;
-
-#[derive(Component)]
-struct MazeHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 #[derive(Component)]
 struct WallVisual;
@@ -234,25 +223,14 @@ fn setup_maze(
     }
 
     // Moon light
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 6000.0,
-            color: Color::srgb(0.7, 0.75, 0.9),
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(
-            EulerRot::XYZ,
-            -0.8,
-            0.3,
-            0.0,
-        )),
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        6000.0,
+        (-0.8, 0.3, 0.0),
+        Color::srgb(0.4, 0.45, 0.6),
+        300.0,
         MazeEntity,
-    ));
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.4, 0.45, 0.6),
-        brightness: 300.0,
-    });
+    );
 
     // Player
     let player = spawn_player(&mut commands, &mut meshes, &mut materials);
@@ -274,80 +252,29 @@ fn setup_maze(
             falloff: FogFalloff::Exponential { density: 0.04 },
             ..default()
         },
-        MazeFollowCam,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 12.0, 12.0),
+            lerp_speed: 6.0,
+            look_offset: Vec3::Y,
+        },
         MazeEntity,
     ));
 
     // HUD
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            MazeEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        MazeEntity,
+    );
 
     // Hint
-    if !scoreboard.maze_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                MazeHintBox,
-                MazeEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("The path is hidden, but your position is not. What if you could simply... be somewhere else? Look for Transform.translation."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        MazeHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(4) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "The path is hidden, but your position is not. What if you could simply... be somewhere else? Look for Transform.translation.",
+            280.0,
+            MazeEntity,
+        );
     }
 }
 
@@ -398,29 +325,15 @@ fn maze_playing_update(
 
 // --- Visual ---
 
-#[allow(clippy::too_many_arguments)]
 fn maze_visual_update(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<MazeFollowCam>, Without<Trophy>)>,
-    mut camera_q: Query<&mut Transform, (With<MazeFollowCam>, Without<Player>, Without<Trophy>)>,
-    mut trophy_q: Query<&mut Transform, (With<Trophy>, Without<Player>, Without<MazeFollowCam>)>,
-    hint_q: Query<Entity, With<MazeHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<MazeHintCloseButton>)>,
+    mut trophy_q: Query<&mut Transform, With<Trophy>>,
     mut walls_visible: ResMut<WallsVisible>,
     mut wall_q: Query<&mut Visibility, With<WallVisual>>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
-
-    // Camera follow
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 12.0, 8.0);
-        let t = (6.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-    }
 
     // Trophy bob
     for mut t in &mut trophy_q {
@@ -438,15 +351,6 @@ fn maze_visual_update(
             *v = vis;
         }
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -456,39 +360,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.maze_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                MazeEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("TROPHY COLLECTED!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(4);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "TROPHY COLLECTED!",
+            None,
+            0.0,
+            "Press any key to continue",
+            MazeEntity,
+        );
     }
 
     for event in events.read() {

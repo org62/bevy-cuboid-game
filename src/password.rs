@@ -215,7 +215,7 @@ fn handle_password_input(
             }
             Key::Enter => {
                 if check_password(&input.text) {
-                    scoreboard.password_solved = true;
+                    scoreboard.set_solved(1);
                     next_phase.set(ChallengePhase::AccessGranted);
                 } else {
                     attempts.count += 1;

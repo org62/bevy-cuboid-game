@@ -14,6 +14,7 @@ mod level13;
 mod menu;
 mod password;
 mod player;
+pub mod shared_ui;
 pub mod walls;
 #[cfg(feature = "test_bot")]
 mod test_bot;
@@ -186,38 +187,20 @@ pub struct GamePaused(pub bool);
 
 // --- Scoreboard ---
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Scoreboard {
-    pub password_solved: bool,
-    pub cannon_solved: bool,
-    pub countdown_solved: bool,
-    pub maze_solved: bool,
-    pub race_solved: bool,
-    pub chest_solved: bool,
-    pub gravity_solved: bool,
-    pub toll_solved: bool,
-    pub arena_solved: bool,
-    pub loot_solved: bool,
-    pub clone_solved: bool,
-    pub final_solved: bool,
-    pub hill_solved: bool,
+    solved: [bool; 13],
+}
+
+impl Default for Scoreboard {
+    fn default() -> Self {
+        Self { solved: [false; 13] }
+    }
 }
 
 impl Scoreboard {
     pub fn total_solved(&self) -> u32 {
-        self.password_solved as u32
-            + self.cannon_solved as u32
-            + self.countdown_solved as u32
-            + self.maze_solved as u32
-            + self.race_solved as u32
-            + self.chest_solved as u32
-            + self.gravity_solved as u32
-            + self.toll_solved as u32
-            + self.arena_solved as u32
-            + self.loot_solved as u32
-            + self.clone_solved as u32
-            + self.final_solved as u32
-            + self.hill_solved as u32
+        self.solved.iter().filter(|&&s| s).count() as u32
     }
 
     pub fn total_challenges(&self) -> u32 {
@@ -225,21 +208,15 @@ impl Scoreboard {
     }
 
     pub fn is_solved(&self, level: u32) -> bool {
-        match level {
-            1 => self.password_solved,
-            2 => self.cannon_solved,
-            3 => self.countdown_solved,
-            4 => self.maze_solved,
-            5 => self.race_solved,
-            6 => self.chest_solved,
-            7 => self.gravity_solved,
-            8 => self.toll_solved,
-            9 => self.arena_solved,
-            10 => self.loot_solved,
-            11 => self.clone_solved,
-            12 => self.final_solved,
-            13 => self.hill_solved,
-            _ => false,
+        level.checked_sub(1)
+            .and_then(|i| self.solved.get(i as usize))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn set_solved(&mut self, level: u32) {
+        if let Some(slot) = level.checked_sub(1).and_then(|i| self.solved.get_mut(i as usize)) {
+            *slot = true;
         }
     }
 }
@@ -258,29 +235,18 @@ mod tests {
     #[test]
     fn scoreboard_counts_correctly() {
         let mut sb = Scoreboard::default();
-        sb.password_solved = true;
-        sb.cannon_solved = true;
-        sb.countdown_solved = true;
+        sb.set_solved(1);
+        sb.set_solved(2);
+        sb.set_solved(3);
         assert_eq!(sb.total_solved(), 3);
     }
 
     #[test]
     fn scoreboard_all_solved() {
-        let sb = Scoreboard {
-            password_solved: true,
-            cannon_solved: true,
-            countdown_solved: true,
-            maze_solved: true,
-            race_solved: true,
-            chest_solved: true,
-            gravity_solved: true,
-            toll_solved: true,
-            arena_solved: true,
-            loot_solved: true,
-            clone_solved: true,
-            final_solved: true,
-            hill_solved: true,
-        };
+        let mut sb = Scoreboard::default();
+        for level in 1..=13 {
+            sb.set_solved(level);
+        }
         assert_eq!(sb.total_solved(), 13);
         assert_eq!(sb.total_solved(), sb.total_challenges());
     }
@@ -288,7 +254,7 @@ mod tests {
     #[test]
     fn is_solved_maps_correctly() {
         let mut sb = Scoreboard::default();
-        sb.maze_solved = true;
+        sb.set_solved(4);
         assert!(sb.is_solved(4));
         assert!(!sb.is_solved(3));
         assert!(!sb.is_solved(0)); // invalid level

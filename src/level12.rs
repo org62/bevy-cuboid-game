@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet, PlayerPhysics,
 };
+use crate::shared_ui;
 use crate::{FinalPhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level12Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level12Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, final_visual_update)
+                (animate_player, final_visual_update, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::FinalChallenge)),
             )
@@ -42,13 +43,7 @@ impl Plugin for Level12Plugin {
 struct FinalEntity;
 
 #[derive(Component)]
-struct FinalFollowCam;
-
-#[derive(Component)]
 struct RoomHudText;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 #[derive(Component)]
 pub(crate) struct GuardianNpc {
@@ -432,7 +427,7 @@ fn setup_final(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 10.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
-        FinalFollowCam,
+        shared_ui::FollowCamera { offset: Vec3::new(0.0, 10.0, 12.0), lerp_speed: 6.0, look_offset: Vec3::Y },
         FinalEntity,
     ));
 
@@ -466,23 +461,7 @@ fn setup_final(
         });
 
     // No hint for Level 12!
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            FinalEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause | You're on your own now."),
-                TextFont { font_size: 18.0, ..default() },
-                TextColor(Color::srgb(0.7, 0.7, 0.7)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(&mut commands, "[Esc] Menu | WASD Move | Space Jump | [P] Pause | You're on your own now.", FinalEntity);
 }
 
 // --- Gameplay ---
@@ -654,24 +633,10 @@ fn advance_room(
 
 // --- Visual ---
 
-#[allow(clippy::too_many_arguments)]
 fn final_visual_update(
-    time: Res<Time>,
     final_state: Res<FinalState>,
-    player_q: Query<&Transform, (With<Player>, Without<FinalFollowCam>)>,
-    mut camera_q: Query<&mut Transform, (With<FinalFollowCam>, Without<Player>)>,
     mut text_q: Query<&mut Text, With<RoomHudText>>,
 ) {
-    let dt = time.delta_secs();
-
-    // Camera
-    if let (Ok(pt), Ok(mut ct)) = (player_q.get_single(), camera_q.get_single_mut()) {
-        let target = pt.translation + Vec3::new(0.0, 10.0, 12.0);
-        let t = (6.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-    }
-
     // HUD
     if let Ok(mut text) = text_q.get_single_mut() {
         let room_name = match final_state.current_room {
@@ -699,44 +664,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.final_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.05, 0.0, 0.15, 0.85)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                FinalEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("THE FINAL EXAM - COMPLETE!"),
-                    TextFont { font_size: 48.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("You've mastered the debugger!"),
-                    TextFont { font_size: 28.0, ..default() },
-                    TextColor(Color::srgb(0.8, 0.9, 1.0)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.7, 0.8)),
-                ));
-            });
+        scoreboard.set_solved(12);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "THE FINAL EXAM - COMPLETE!",
+            Some("You've mastered the debugger!"),
+            28.0,
+            "Press any key to continue",
+            FinalEntity,
+        );
     }
 
     for event in events.read() {

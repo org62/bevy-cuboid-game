@@ -5,6 +5,7 @@ use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
     Player, PlayerMovementSet,
 };
+use crate::shared_ui;
 use crate::{ChestPhase, GamePaused, Screen, Scoreboard};
 
 pub struct Level6Plugin;
@@ -20,7 +21,7 @@ impl Plugin for Level6Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, chest_visual_update)
+                (animate_player, chest_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::ChestChallenge)),
             )
@@ -42,24 +43,12 @@ impl Plugin for Level6Plugin {
 struct ChestEntity;
 
 #[derive(Component)]
-struct ChestFollowCam;
-
-#[derive(Component)]
 struct TreasureChest {
     opened: bool,
 }
 
 #[derive(Component)]
 struct KeyHudText;
-
-#[derive(Component)]
-struct ChestHintBox;
-
-#[derive(Component)]
-struct ChestHintCloseButton;
-
-#[derive(Component)]
-struct OverlayScreen;
 
 #[derive(Component)]
 struct ChestInteractPrompt;
@@ -167,10 +156,14 @@ fn setup_chest(
             ChestEntity,
         ));
     }
-    commands.insert_resource(AmbientLight {
-        color: Color::srgb(0.8, 0.65, 0.45),
-        brightness: 250.0,
-    });
+    shared_ui::setup_level_lighting(
+        &mut commands,
+        0.0,
+        (-0.8, 0.3, 0.0),
+        Color::srgb(0.8, 0.65, 0.45),
+        250.0,
+        ChestEntity,
+    );
 
     // Treasure chests on pedestals
     let chest_mat = materials.add(StandardMaterial {
@@ -245,7 +238,11 @@ fn setup_chest(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 8.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ChestFollowCam,
+        shared_ui::FollowCamera {
+            offset: Vec3::new(0.0, 8.0, 8.0),
+            lerp_speed: 8.0,
+            look_offset: Vec3::Y,
+        },
         ChestEntity,
     ));
 
@@ -319,75 +316,20 @@ fn setup_chest(
         });
 
     // Controls
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                left: Val::Px(16.0),
-                ..default()
-            },
-            ChestEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("[Esc] Menu | WASD Move | Space Jump | [P] Pause"),
-                TextFont { font_size: 20.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.9, 0.9)),
-            ));
-        });
+    shared_ui::spawn_controls_hint(
+        &mut commands,
+        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        ChestEntity,
+    );
 
     // Hint
-    if !scoreboard.chest_solved {
-        commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(16.0),
-                    right: Val::Px(16.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(14.0)),
-                    row_gap: Val::Px(8.0),
-                    max_width: Val::Px(280.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.1, 0.08, 0.15, 0.9)),
-                BorderRadius::all(Val::Px(10.0)),
-                ChestHintBox,
-                ChestEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("Hint"),
-                    TextFont { font_size: 20.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                ));
-                parent.spawn((
-                    Node { max_width: Val::Px(250.0), ..default() },
-                    Text::new("No keys to be found... The inventory holds a pointer to your key ring. Set a breakpoint on try_open_chest() and inspect inventory.keys."),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::srgb(0.85, 0.85, 0.85)),
-                ));
-                parent
-                    .spawn((
-                        Node {
-                            align_self: AlignSelf::FlexEnd,
-                            padding: UiRect::axes(Val::Px(12.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                        Button,
-                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.15)),
-                        BorderRadius::all(Val::Px(6.0)),
-                        ChestHintCloseButton,
-                    ))
-                    .with_children(|btn| {
-                        btn.spawn((
-                            Text::new("[X] Close"),
-                            TextFont { font_size: 14.0, ..default() },
-                            TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                        ));
-                    });
-            });
+    if !scoreboard.is_solved(6) {
+        shared_ui::spawn_hint_box(
+            &mut commands,
+            "No keys to be found... The inventory holds a pointer to your key ring. Set a breakpoint on try_open_chest() and inspect inventory.keys.",
+            280.0,
+            ChestEntity,
+        );
     }
 }
 
@@ -437,35 +379,23 @@ fn chest_visual_update(
     time: Res<Time>,
     inventory: Res<Inventory>,
     chests_opened: Res<ChestsOpened>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    player_q: Query<&Transform, (With<Player>, Without<ChestFollowCam>, Without<TreasureChest>)>,
-    mut camera_q: Query<
-        (&mut Transform, &Camera, &GlobalTransform),
-        (With<ChestFollowCam>, Without<Player>, Without<TreasureChest>),
+    player_q: Query<&Transform, (With<Player>, Without<shared_ui::FollowCamera>, Without<TreasureChest>)>,
+    camera_q: Query<
+        (&Camera, &GlobalTransform),
+        (With<shared_ui::FollowCamera>, Without<Player>, Without<TreasureChest>),
     >,
-    chest_q: Query<(&Transform, &TreasureChest), (Without<Player>, Without<ChestFollowCam>)>,
+    chest_q: Query<(&Transform, &TreasureChest), (Without<Player>, Without<shared_ui::FollowCamera>)>,
     mut text_q: Query<&mut Text, (With<KeyHudText>, Without<ChestInteractPrompt>)>,
-    hint_q: Query<Entity, With<ChestHintBox>>,
-    btn_q: Query<&Interaction, (Changed<Interaction>, With<ChestHintCloseButton>)>,
     mut prompt_q: Query<(&mut Node, &mut Visibility), (With<ChestInteractPrompt>, Without<NoKeyWarningText>)>,
     mut warning_q: Query<&mut Visibility, (With<NoKeyWarningText>, Without<ChestInteractPrompt>)>,
     mut no_key_warning: ResMut<NoKeyWarning>,
 ) {
     let dt = time.delta_secs();
 
-    // Camera
-    let cam_data = if let (Ok(pt), Ok((mut ct, camera, cam_gt))) =
-        (player_q.get_single(), camera_q.get_single_mut())
-    {
-        let target = pt.translation + Vec3::new(0.0, 8.0, 8.0);
-        let t = (8.0 * dt).min(1.0);
-        ct.translation = ct.translation.lerp(target, t);
-        ct.look_at(pt.translation + Vec3::Y, Vec3::Y);
-        Some((camera.clone(), cam_gt.clone()))
-    } else {
-        None
-    };
+    // Camera data for world-to-screen projection
+    let cam_data = camera_q.get_single().ok().map(|(camera, cam_gt)| {
+        (camera.clone(), cam_gt.clone())
+    });
 
     // Interact prompt: find nearest unopened chest within range
     if let Ok(pt) = player_q.get_single() {
@@ -518,15 +448,6 @@ fn chest_visual_update(
             Visibility::Hidden
         };
     }
-
-    // Hint dismiss
-    let should_close = keyboard.just_pressed(KeyCode::KeyX)
-        || btn_q.iter().any(|i| *i == Interaction::Pressed);
-    if should_close {
-        for entity in &hint_q {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
 }
 
 // --- Victory ---
@@ -536,39 +457,18 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<OverlayScreen>>,
+    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
-        scoreboard.chest_solved = true;
-        commands
-            .spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(16.0),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.15, 0.0, 0.8)),
-                GlobalZIndex(10),
-                OverlayScreen,
-                ChestEntity,
-            ))
-            .with_children(|parent| {
-                parent.spawn((
-                    Text::new("ALL CHESTS OPENED!"),
-                    TextFont { font_size: 52.0, ..default() },
-                    TextColor(Color::srgb(1.0, 0.85, 0.2)),
-                ));
-                parent.spawn((
-                    Text::new("Press any key to continue"),
-                    TextFont { font_size: 22.0, ..default() },
-                    TextColor(Color::srgb(0.6, 0.8, 0.6)),
-                ));
-            });
+        scoreboard.set_solved(6);
+        shared_ui::spawn_victory_overlay(
+            &mut commands,
+            "ALL CHESTS OPENED!",
+            None,
+            0.0,
+            "Press any key to continue",
+            ChestEntity,
+        );
     }
 
     for event in events.read() {

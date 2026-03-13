@@ -1,10 +1,8 @@
 use bevy::prelude::*;
 
 use crate::player::{Player, PlayerPhysics, SquashState};
-use crate::GamePaused;
 
 use super::components::*;
-use super::constants::*;
 use super::debugger;
 use super::resources::*;
 
@@ -168,24 +166,5 @@ pub(super) fn water_slide_system(
     }
 }
 
-pub(super) fn follow_camera(
-    time: Res<Time>,
-    player_q: Query<&Transform, (With<Player>, Without<HillFollowCam>)>,
-    mut cam_q: Query<&mut Transform, (With<HillFollowCam>, Without<Player>)>,
-) {
-    let Ok(player_tf) = player_q.get_single() else { return };
-    let Ok(mut cam_tf) = cam_q.get_single_mut() else { return };
 
-    let target_pos = player_tf.translation + CAM_OFFSET;
-    let lerp_factor = (12.0 * time.delta_secs()).min(1.0);
-    cam_tf.translation = cam_tf.translation.lerp(target_pos, lerp_factor);
-    cam_tf.look_at(player_tf.translation, Vec3::Y);
-}
 
-pub(super) fn hill_playing_update(
-    game_paused: Res<GamePaused>,
-) {
-    if game_paused.0 {
-        return;
-    }
-}

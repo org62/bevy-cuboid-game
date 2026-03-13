@@ -15,6 +15,13 @@ fn checkpoint_position(i: usize) -> Vec3 {
     wp - incoming_dir * 2.0
 }
 
+/// Cached checkpoint positions (computed once since they derive from constants).
+fn cached_checkpoint_positions() -> &'static [Vec3; NUM_CHECKPOINTS] {
+    use std::sync::OnceLock;
+    static POSITIONS: OnceLock<[Vec3; NUM_CHECKPOINTS]> = OnceLock::new();
+    POSITIONS.get_or_init(|| std::array::from_fn(checkpoint_position))
+}
+
 fn reset_bot(tf: &mut Transform, bot: &mut RaceBot) {
     bot.progress = 0.0;
     tf.translation = RACE_WAYPOINTS[0];
@@ -232,11 +239,12 @@ pub(super) fn race_bot_movement_system(
         tf.rotation = look_tf.rotation;
 
         // Detect bot checkpoint crossings using same radius as player
+        let cp_positions = cached_checkpoint_positions();
         for i in 0..NUM_CHECKPOINTS {
             if race_state.bot_checkpoints[i] {
                 continue;
             }
-            let cp_pos = checkpoint_position(i);
+            let cp_pos = cp_positions[i];
             let dx = pos.x - cp_pos.x;
             let dz = pos.z - cp_pos.z;
             if dx * dx + dz * dz < CHECKPOINT_RADIUS * CHECKPOINT_RADIUS {
@@ -251,6 +259,7 @@ pub(super) fn race_player_tracking_system(
     player_q: Query<&Transform, With<Player>>,
     bot_q: Query<&RaceBot>,
     mut status_text_q: Query<&mut Text, (With<RaceStatusText>, Without<RaceCountdownText>)>,
+    mut prev_reached: Local<usize>,
 ) {
     if race_state.phase != HillRacePhase::Racing {
         return;
@@ -259,11 +268,12 @@ pub(super) fn race_player_tracking_system(
     let pp = player_tf.translation;
 
     // Check every checkpoint — player can reach them in any order
+    let cp_positions = cached_checkpoint_positions();
     for i in 0..NUM_CHECKPOINTS {
         if race_state.player_checkpoints[i] {
             continue;
         }
-        let cp_pos = checkpoint_position(i);
+        let cp_pos = cp_positions[i];
         let dx = pp.x - cp_pos.x;
         let dz = pp.z - cp_pos.z;
         if dx * dx + dz * dz < CHECKPOINT_RADIUS * CHECKPOINT_RADIUS && (pp.y - cp_pos.y).abs() < 2.0 {
@@ -274,14 +284,15 @@ pub(super) fn race_player_tracking_system(
     let reached = race_state.player_checkpoints.iter().filter(|&&v| v).count();
     let all_reached = reached == NUM_CHECKPOINTS;
 
-    // Update status text with checkpoint progress
-    let msg = if all_reached {
-        "All checkpoints! Return to start!".to_string()
-    } else {
-        format!("Checkpoints: {}/{}", reached, NUM_CHECKPOINTS)
-    };
-    for mut text in &mut status_text_q {
-        if text.as_str() != msg {
+    // Only update status text when checkpoint count changes to avoid per-frame allocation
+    if reached != *prev_reached {
+        *prev_reached = reached;
+        let msg = if all_reached {
+            "All checkpoints! Return to start!".to_string()
+        } else {
+            format!("Checkpoints: {}/{}", reached, NUM_CHECKPOINTS)
+        };
+        for mut text in &mut status_text_q {
             **text = msg.clone();
         }
     }
