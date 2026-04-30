@@ -33,7 +33,7 @@ struct MenuSelection(Option<usize>);
 #[derive(Resource)]
 struct MenuNavCooldown(f32);
 
-const LEVEL_NAMES: [&str; 14] = [
+const LEVEL_NAMES: [&str; 15] = [
     "The Password Gate",
     "The Cannon Gauntlet",
     "The Countdown",
@@ -48,6 +48,7 @@ const LEVEL_NAMES: [&str; 14] = [
     "The Final Exam",
     "The Hill Fortress",
     "The Rolling Meadow",
+    "The Indoor Waterpark",
 ];
 
 fn screen_for_level(level: u32) -> Option<Screen> {
@@ -66,6 +67,7 @@ fn screen_for_level(level: u32) -> Option<Screen> {
         12 => Some(Screen::FinalChallenge),
         13 => Some(Screen::HillChallenge),
         14 => Some(Screen::MeadowChallenge),
+        15 => Some(Screen::WaterparkChallenge),
         _ => None,
     }
 }
@@ -181,7 +183,7 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
 
             // Hint
             parent.spawn((
-                Text::new("Press 1-9, 0, -, = or click to start  |  D-pad + A on gamepad"),
+                Text::new("Press 1-9, 0, -, =, \\, ], [ or click to start  |  D-pad + A on gamepad"),
                 TextFont {
                     font_size: 16.0,
                     ..default()
@@ -219,6 +221,7 @@ fn menu_keyboard(
                 "=" => Some(12),
                 "\\" => Some(13),
                 "]" => Some(14),
+                "[" => Some(15),
                 _ => None,
             };
             if let Some(l) = level {
@@ -262,7 +265,7 @@ fn menu_button_hover(
     }
 }
 
-const NUM_LEVELS: usize = 14;
+const NUM_LEVELS: usize = 15;
 const MENU_COLS: usize = 2;
 
 fn menu_gamepad(
