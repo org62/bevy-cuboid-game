@@ -11,6 +11,7 @@ mod level10;
 mod level11;
 mod level12;
 mod level13;
+mod level14;
 mod menu;
 mod password;
 mod player;
@@ -41,6 +42,7 @@ pub enum Screen {
     CloneChallenge,
     FinalChallenge,
     HillChallenge,
+    MeadowChallenge,
 }
 
 // --- Challenge phases (sub-state of PasswordChallenge) ---
@@ -180,6 +182,16 @@ pub enum HillPhase {
     Victory,
 }
 
+// --- Meadow phases (Level 14) ---
+
+#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
+#[source(Screen = Screen::MeadowChallenge)]
+pub enum MeadowPhase {
+    #[default]
+    Playing,
+    Victory,
+}
+
 // --- Pause ---
 
 #[derive(Resource, Default)]
@@ -189,12 +201,12 @@ pub struct GamePaused(pub bool);
 
 #[derive(Resource)]
 pub struct Scoreboard {
-    solved: [bool; 13],
+    solved: [bool; 14],
 }
 
 impl Default for Scoreboard {
     fn default() -> Self {
-        Self { solved: [false; 13] }
+        Self { solved: [false; 14] }
     }
 }
 
@@ -204,7 +216,7 @@ impl Scoreboard {
     }
 
     pub fn total_challenges(&self) -> u32 {
-        13
+        14
     }
 
     pub fn is_solved(&self, level: u32) -> bool {
@@ -229,7 +241,7 @@ mod tests {
     fn scoreboard_starts_empty() {
         let sb = Scoreboard::default();
         assert_eq!(sb.total_solved(), 0);
-        assert_eq!(sb.total_challenges(), 13);
+        assert_eq!(sb.total_challenges(), 14);
     }
 
     #[test]
@@ -244,10 +256,10 @@ mod tests {
     #[test]
     fn scoreboard_all_solved() {
         let mut sb = Scoreboard::default();
-        for level in 1..=13 {
+        for level in 1..=14 {
             sb.set_solved(level);
         }
-        assert_eq!(sb.total_solved(), 13);
+        assert_eq!(sb.total_solved(), 14);
         assert_eq!(sb.total_solved(), sb.total_challenges());
     }
 
@@ -258,11 +270,11 @@ mod tests {
         assert!(sb.is_solved(4));
         assert!(!sb.is_solved(3));
         assert!(!sb.is_solved(0)); // invalid level
-        assert!(!sb.is_solved(14)); // invalid level
+        assert!(!sb.is_solved(15)); // invalid level
     }
 
     #[test]
-    fn all_13_levels_have_screens() {
+    fn all_14_levels_have_screens() {
         // Verify Screen enum has all variants
         let screens = [
             Screen::Menu,
@@ -279,8 +291,9 @@ mod tests {
             Screen::CloneChallenge,
             Screen::FinalChallenge,
             Screen::HillChallenge,
+            Screen::MeadowChallenge,
         ];
-        assert_eq!(screens.len(), 14); // 13 levels + menu
+        assert_eq!(screens.len(), 15); // 14 levels + menu
     }
 }
 
@@ -322,6 +335,7 @@ fn main() {
         .add_sub_state::<ClonePhase>()
         .add_sub_state::<FinalPhase>()
         .add_sub_state::<HillPhase>()
+        .add_sub_state::<MeadowPhase>()
         .init_resource::<Scoreboard>()
         .init_resource::<GamePaused>()
         .add_systems(OnEnter(Screen::Menu), reset_pause)
@@ -341,7 +355,8 @@ fn main() {
             level11::Level11Plugin,
             level12::Level12Plugin,
             level13::Level13Plugin,
-        ));
+        ))
+        .add_plugins(level14::Level14Plugin);
     #[cfg(feature = "test_bot")]
     app.add_plugins(test_bot::TestBotPlugin);
     app.run();

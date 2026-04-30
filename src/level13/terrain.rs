@@ -94,17 +94,55 @@ pub(super) fn terrain_collision(
     } else {
         0.0
     };
+
+    // Previous-frame position. player_movement already advanced the transform
+    // by `velocity * dt`, so subtracting it back gives where the player was
+    // before this frame's motion. Used for the swept-path test below — without
+    // it, fast diagonal motion (e.g. sliding down stair-stepped surfaces, or
+    // running off the edge of a tier) lets the player tunnel between cells
+    // without ever satisfying `player.y <= surface.y + 0.1`.
+    let prev_x = px - physics.velocity.x * dt;
+    let prev_y = transform.translation.y - physics.velocity.y * dt;
+    let prev_z = pz - physics.velocity.z * dt;
+
     let mut best_y = -2.0_f32; // below any surface (pool is at -1.2)
     for surf in &surfaces {
-        if px >= surf.min.x && px <= surf.max.x && pz >= surf.min.y && pz <= surf.max.y {
-            if surf.y <= transform.translation.y + tolerance && surf.y > best_y {
-                best_y = surf.y;
-            }
+        let in_now = px >= surf.min.x && px <= surf.max.x && pz >= surf.min.y && pz <= surf.max.y;
+        let in_prev = prev_x >= surf.min.x && prev_x <= surf.max.x
+            && prev_z >= surf.min.y && prev_z <= surf.max.y;
+        if !(in_now || in_prev) { continue; }
+
+        // Standing / vertical phase-through check (only at current XZ).
+        if in_now && surf.y <= transform.translation.y + tolerance && surf.y > best_y {
+            best_y = surf.y;
+        }
+        // Swept check: if the player crossed this surface vertically while
+        // moving downward, snap to it even if the current XZ is over a cell
+        // whose surface is lower.
+        if physics.velocity.y <= 0.0
+            && prev_y >= surf.y - 0.05
+            && transform.translation.y < surf.y
+            && surf.y > best_y
+        {
+            best_y = surf.y;
         }
     }
 
-    // Snap player to surface if on or below it (but not while jumping upward)
-    if transform.translation.y <= best_y + 0.1 && physics.velocity.y <= 0.0 {
+    // Snap player to surface if on or below it, OR if the swept test showed
+    // they crossed it during the frame, OR step-down: player was statically
+    // grounded last frame and walked off a small ledge. Step-down keeps fast
+    // slides and tier walk-offs in contact with each successive surface
+    // instead of letting horizontal velocity carry the player past several
+    // cells before gravity catches them. Gated on `vy.abs < 0.01` so jumps
+    // and active falls aren't intercepted. `best_y > -1.5` keeps the snap
+    // out of the void (terrain surfaces start at the pool top -1.2).
+    let crossed = physics.velocity.y <= 0.0 && prev_y >= best_y && transform.translation.y < best_y;
+    let static_grounded_last = !was_airborne && physics.velocity.y.abs() < 0.01;
+    let step_down = static_grounded_last
+        && transform.translation.y > best_y
+        && transform.translation.y - best_y <= 1.5
+        && best_y > -1.5;
+    if (transform.translation.y <= best_y + 0.1 || crossed || step_down) && physics.velocity.y <= 0.0 {
         transform.translation.y = best_y;
         physics.velocity.y = 0.0;
         if was_airborne {
