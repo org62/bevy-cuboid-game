@@ -15,7 +15,11 @@ impl Plugin for Level10Plugin {
         app.add_systems(OnEnter(Screen::LootChallenge), setup_loot)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), loot_playing_update)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    loot_playing_update,
+                )
                     .chain()
                     .run_if(in_state(LootPhase::Playing)),
             )

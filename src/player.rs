@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::GamePaused;
+use crate::shared_ui::CameraOrbit;
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlayerMovementSet;
@@ -119,7 +120,7 @@ pub fn spawn_player(
             parent.spawn((
                 Mesh3d(meshes.add(Cuboid::new(0.6, 0.8, 0.5))),
                 MeshMaterial3d(coral.clone()),
-                Transform::from_xyz(0.0, 0.8, 0.0),
+                Transform::from_xyz(0.0, 0.4, 0.0),
                 PlayerBody,
             ));
             // Head with eyes
@@ -127,7 +128,7 @@ pub fn spawn_player(
                 .spawn((
                     Mesh3d(meshes.add(Cuboid::new(0.65, 0.6, 0.55))),
                     MeshMaterial3d(coral),
-                    Transform::from_xyz(0.0, 1.5, 0.0),
+                    Transform::from_xyz(0.0, 1.1, 0.0),
                     PlayerHead,
                 ))
                 .with_children(|head| {
@@ -170,6 +171,7 @@ pub fn player_movement(
     ground_y_override: Option<Res<GroundYOverride>>,
     power_ups: Option<Res<PowerUpState>>,
     game_paused: Res<GamePaused>,
+    orbit: Res<CameraOrbit>,
     mut query: Query<(&mut Transform, &mut PlayerPhysics, &mut SquashState, &MovementBounds), With<Player>>,
 ) {
     if game_paused.0 {
@@ -210,7 +212,7 @@ pub fn player_movement(
 
     let has_input = input_dir.length_squared() > 0.0;
     if has_input {
-        input_dir = input_dir.normalize();
+        input_dir = Quat::from_rotation_y(orbit.yaw) * input_dir.normalize();
     }
 
     let effective_max_speed = MAX_SPEED * power_ups.as_ref().map_or(1.0, |p| if p.speed_multiplier > 0.0 { p.speed_multiplier } else { 1.0 });
@@ -346,7 +348,7 @@ pub fn toggle_pause(
 
 pub fn animate_player(
     time: Res<Time>,
-    mut player_query: Query<(&PlayerPhysics, &mut SquashState, &Children), With<Player>>,
+    mut player_query: Query<(&Transform, &PlayerPhysics, &mut SquashState, &Children), With<Player>>,
     mut body_query: Query<
         &mut Transform,
         (With<PlayerBody>, Without<PlayerHead>, Without<Player>),
@@ -355,13 +357,26 @@ pub fn animate_player(
         &mut Transform,
         (With<PlayerHead>, Without<PlayerBody>, Without<Player>),
     >,
+    mut smoothed_y: Local<Option<f32>>,
 ) {
-    let Ok((physics, mut squash, children)) = player_query.get_single_mut() else {
+    let Ok((player_tf, physics, mut squash, children)) = player_query.get_single_mut() else {
         return;
     };
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
     let horiz_speed = Vec2::new(physics.velocity.x, physics.velocity.z).length();
+
+    // Visual Y smoothing: body/head trail physics on stair snaps
+    let py = player_tf.translation.y;
+    let sy = *smoothed_y.get_or_insert(py);
+    let new_sy = if (sy - py).abs() > 10.0 {
+        py
+    } else {
+        let rate = if physics.grounded { 5.0 } else { 20.0 };
+        sy + (py - sy) * (rate * dt).min(1.0)
+    };
+    *smoothed_y = Some(new_sy);
+    let visual_y_offset = new_sy - py;
 
     // Idle bob
     let bob = if horiz_speed < 0.5 && physics.grounded {
@@ -381,11 +396,11 @@ pub fn animate_player(
 
     for &child in children.iter() {
         if let Ok(mut t) = body_query.get_mut(child) {
-            t.translation.y = 0.8 + bob;
+            t.translation.y = 0.4 + bob + visual_y_offset;
             t.scale = Vec3::new(xz_scale, y_scale, xz_scale);
         }
         if let Ok(mut t) = head_query.get_mut(child) {
-            t.translation.y = 1.5 + bob;
+            t.translation.y = 1.1 + bob + visual_y_offset;
             t.scale = Vec3::new(xz_scale, y_scale, xz_scale);
         }
     }

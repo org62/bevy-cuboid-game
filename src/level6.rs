@@ -15,7 +15,11 @@ impl Plugin for Level6Plugin {
         app.add_systems(OnEnter(Screen::ChestChallenge), setup_chest)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), chest_playing_update)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    chest_playing_update,
+                )
                     .chain()
                     .run_if(in_state(ChestPhase::Playing)),
             )

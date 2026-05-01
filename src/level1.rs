@@ -20,7 +20,11 @@ impl Plugin for Level1Plugin {
             .add_systems(OnEnter(Screen::PasswordChallenge), setup_world)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), detect_zone)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    detect_zone,
+                )
                     .run_if(in_state(ChallengePhase::Exploring)),
             )
             .add_systems(

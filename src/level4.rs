@@ -15,7 +15,11 @@ impl Plugin for Level4Plugin {
         app.add_systems(OnEnter(Screen::MazeChallenge), setup_maze)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), maze_playing_update)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    maze_playing_update,
+                )
                     .chain()
                     .run_if(in_state(MazePhase::Playing)),
             )

@@ -312,10 +312,14 @@ mod tests {
 
 fn reset_pause(
     mut game_paused: ResMut<GamePaused>,
+    mut camera_orbit: ResMut<shared_ui::CameraOrbit>,
     mut commands: Commands,
     overlay_q: Query<Entity, With<player::PauseOverlay>>,
 ) {
     game_paused.0 = false;
+    camera_orbit.yaw = 0.0;
+    camera_orbit.pitch = 0.0;
+    camera_orbit.zoom = 1.0;
     for entity in &overlay_q {
         commands.entity(entity).despawn_recursive();
     }
@@ -352,6 +356,7 @@ fn main() {
         .add_sub_state::<WaterparkPhase>()
         .init_resource::<Scoreboard>()
         .init_resource::<GamePaused>()
+        .init_resource::<shared_ui::CameraOrbit>()
         .add_systems(OnEnter(Screen::Menu), reset_pause)
         .add_plugins((
             menu::MenuPlugin,

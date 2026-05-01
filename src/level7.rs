@@ -15,7 +15,11 @@ impl Plugin for Level7Plugin {
         app.add_systems(OnEnter(Screen::GravityChallenge), setup_gravity)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), gravity_playing_update)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    gravity_playing_update,
+                )
                     .chain()
                     .run_if(in_state(GravityPhase::Playing)),
             )

@@ -78,14 +78,14 @@ pub(super) fn spawn_race_bot(
             parent.spawn((
                 Mesh3d(meshes.add(Cuboid::new(0.6, 0.8, 0.5))),
                 MeshMaterial3d(bot_green.clone()),
-                Transform::from_xyz(0.0, 0.8, 0.0),
+                Transform::from_xyz(0.0, 0.4, 0.0),
             ));
             // Head with eyes
             parent
                 .spawn((
                     Mesh3d(meshes.add(Cuboid::new(0.65, 0.6, 0.55))),
                     MeshMaterial3d(bot_green),
-                    Transform::from_xyz(0.0, 1.5, 0.0),
+                    Transform::from_xyz(0.0, 1.1, 0.0),
                 ))
                 .with_children(|head| {
                     // Left eye

@@ -15,7 +15,11 @@ impl Plugin for Level9Plugin {
         app.add_systems(OnEnter(Screen::ArenaChallenge), setup_arena)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), arena_playing_update)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    arena_playing_update,
+                )
                     .chain()
                     .run_if(in_state(ArenaPhase::Playing)),
             )

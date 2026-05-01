@@ -15,7 +15,11 @@ impl Plugin for Level11Plugin {
         app.add_systems(OnEnter(Screen::CloneChallenge), setup_clone)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), clone_playing_update)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    clone_playing_update,
+                )
                     .chain()
                     .run_if(in_state(ClonePhase::Playing)),
             )

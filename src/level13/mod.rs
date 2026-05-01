@@ -30,7 +30,11 @@ impl Plugin for Level13Plugin {
         app.add_systems(OnEnter(Screen::HillChallenge), setup_hill)
             .add_systems(
                 Update,
-                (player_movement.in_set(PlayerMovementSet), terrain_collision)
+                (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
+                    player_movement.in_set(PlayerMovementSet),
+                    terrain_collision,
+                )
                     .chain()
                     .run_if(in_state(HillPhase::Playing)),
             )

@@ -15,10 +15,11 @@ impl Plugin for Level15Plugin {
             .add_systems(
                 Update,
                 (
+                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
                     player_movement.in_set(PlayerMovementSet),
                     terrain_collision,
                     water_slide_system,
-                    (animate_player, smooth_camera_system),
+                    (animate_player, shared_ui::follow_camera_system),
                     snack_eat_system,
                     slides_complete_check,
                     update_progress_text,
@@ -78,9 +79,6 @@ struct ProgressText;
 
 #[derive(Resource, Default)]
 struct SlidesRidden([bool; 5]);
-
-#[derive(Resource)]
-struct SmoothCameraTarget(Vec3);
 
 // --- Constants ---
 
@@ -398,7 +396,6 @@ fn setup_waterpark(
         },
         WaterparkEntity,
     ));
-    commands.insert_resource(SmoothCameraTarget(PLAYER_SPAWN));
 
     // --- HUD ---
     commands
@@ -509,31 +506,6 @@ fn spawn_block(
         SolidBlock { min, max, y_min, y_max },
         WaterparkEntity,
     ));
-}
-
-// --- Smooth camera (port of level14's two-rate smoothing). Tracks player XZ
-//     fast and Y slow so jumping stair steps and bumping down slide segments
-//     don't translate into camera jitter. ---
-
-fn smooth_camera_system(
-    player_q: Query<&Transform, (With<Player>, Without<shared_ui::FollowCamera>)>,
-    mut cam_q: Query<(&mut Transform, &shared_ui::FollowCamera), Without<Player>>,
-    mut smooth: ResMut<SmoothCameraTarget>,
-    time: Res<Time>,
-) {
-    let Ok(player_tf) = player_q.get_single() else { return };
-    let Ok((mut cam_tf, follow)) = cam_q.get_single_mut() else { return };
-    let dt = time.delta_secs();
-    let p = player_tf.translation;
-    let txz = (15.0 * dt).min(1.0);
-    let ty = (4.0 * dt).min(1.0);
-    smooth.0.x += (p.x - smooth.0.x) * txz;
-    smooth.0.z += (p.z - smooth.0.z) * txz;
-    smooth.0.y += (p.y - smooth.0.y) * ty;
-    let target_pos = smooth.0 + follow.offset;
-    let t = (follow.lerp_speed * dt).min(1.0);
-    cam_tf.translation = cam_tf.translation.lerp(target_pos, t);
-    cam_tf.look_at(smooth.0 + follow.look_offset, Vec3::Y);
 }
 
 // --- Terrain collision (swept; mirrors src/level14.rs:429-526 + level13 SolidBlock pushout) ---
@@ -798,5 +770,4 @@ fn cleanup_waterpark(mut commands: Commands, query: Query<Entity, With<Waterpark
     }
     commands.remove_resource::<GroundYOverride>();
     commands.remove_resource::<SlidesRidden>();
-    commands.remove_resource::<SmoothCameraTarget>();
 }

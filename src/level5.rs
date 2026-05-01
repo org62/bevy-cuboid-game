@@ -291,13 +291,13 @@ fn setup_race(
                 parent.spawn((
                     Mesh3d(meshes.add(Cuboid::new(0.6, 0.8, 0.5))),
                     MeshMaterial3d(ai_mat.clone()),
-                    Transform::from_xyz(0.0, 0.8, 0.0),
+                    Transform::from_xyz(0.0, 0.4, 0.0),
                 ));
                 // Head (no eyes)
                 parent.spawn((
                     Mesh3d(meshes.add(Cuboid::new(0.65, 0.6, 0.55))),
                     MeshMaterial3d(ai_mat),
-                    Transform::from_xyz(0.0, 1.5, 0.0),
+                    Transform::from_xyz(0.0, 1.1, 0.0),
                 ));
             });
     }

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::player::Player;
+use crate::player::{Player, PlayerPhysics};
 
 // --- Shared components ---
 
@@ -18,6 +18,19 @@ pub struct FollowCamera {
     pub offset: Vec3,
     pub lerp_speed: f32,
     pub look_offset: Vec3,
+}
+
+#[derive(Resource)]
+pub struct CameraOrbit {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub zoom: f32,
+}
+
+impl Default for CameraOrbit {
+    fn default() -> Self {
+        Self { yaw: 0.0, pitch: 0.0, zoom: 1.0 }
+    }
 }
 
 // --- Hint box ---
@@ -247,14 +260,69 @@ pub fn setup_level_lighting(
 // --- Camera follow ---
 
 pub fn follow_camera_system(
-    player_q: Query<&Transform, (With<Player>, Without<FollowCamera>)>,
+    player_q: Query<(&Transform, &PlayerPhysics), (With<Player>, Without<FollowCamera>)>,
     mut cam_q: Query<(&mut Transform, &FollowCamera), Without<Player>>,
+    orbit: Res<CameraOrbit>,
+    mut smoothed: Local<Option<Vec3>>,
     time: Res<Time>,
 ) {
-    let Ok(player_tf) = player_q.get_single() else { return };
+    let Ok((player_tf, physics)) = player_q.get_single() else { return };
     let Ok((mut cam_tf, follow)) = cam_q.get_single_mut() else { return };
-    let target_pos = player_tf.translation + follow.offset;
-    let t = (follow.lerp_speed * time.delta_secs()).min(1.0);
+    let dt = time.delta_secs();
+    let p = player_tf.translation;
+    let s = *smoothed.get_or_insert(p);
+    let new_s = if s.distance_squared(p) > 100.0 {
+        p
+    } else {
+        let txz = (15.0 * dt).min(1.0);
+        let ty_rate = if physics.grounded { 5.0 } else { 20.0 };
+        let ty = (ty_rate * dt).min(1.0);
+        Vec3::new(
+            s.x + (p.x - s.x) * txz,
+            s.y + (p.y - s.y) * ty,
+            s.z + (p.z - s.z) * txz,
+        )
+    };
+    *smoothed = Some(new_s);
+
+    let rot = Quat::from_rotation_y(orbit.yaw) * Quat::from_rotation_x(orbit.pitch);
+    let target_pos = new_s + rot * (follow.offset * orbit.zoom);
+    let t = (follow.lerp_speed * dt).min(1.0);
     cam_tf.translation = cam_tf.translation.lerp(target_pos, t);
-    cam_tf.look_at(player_tf.translation + follow.look_offset, Vec3::Y);
+    cam_tf.look_at(new_s + follow.look_offset, Vec3::Y);
+}
+
+pub fn update_camera_orbit(
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    game_paused: Res<crate::GamePaused>,
+    mut orbit: ResMut<CameraOrbit>,
+) {
+    if game_paused.0 {
+        return;
+    }
+    const DEADZONE: f32 = 0.2;
+    const YAW_RATE: f32 = 2.5;
+    const PITCH_RATE: f32 = 1.5;
+    const PITCH_CLAMP: f32 = 0.7;
+    const TRIGGER_DEADZONE: f32 = 0.05;
+    const ZOOM_RATE: f32 = 1.5;
+    const ZOOM_MIN: f32 = 0.5;
+    const ZOOM_MAX: f32 = 2.5;
+    let dt = time.delta_secs();
+    for gp in &gamepads {
+        let stick = gp.right_stick();
+        if stick.x.abs() > DEADZONE {
+            orbit.yaw -= stick.x * YAW_RATE * dt;
+        }
+        if stick.y.abs() > DEADZONE {
+            orbit.pitch =
+                (orbit.pitch + stick.y * PITCH_RATE * dt).clamp(-PITCH_CLAMP, PITCH_CLAMP);
+        }
+        let zoom_delta = gp.get(GamepadButton::RightTrigger2).unwrap_or(0.0)
+            - gp.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
+        if zoom_delta.abs() > TRIGGER_DEADZONE {
+            orbit.zoom = (orbit.zoom - zoom_delta * ZOOM_RATE * dt).clamp(ZOOM_MIN, ZOOM_MAX);
+        }
+    }
 }
