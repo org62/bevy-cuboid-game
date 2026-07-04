@@ -7,9 +7,9 @@ use crate::player::{
 use crate::shared_ui;
 use crate::{MeadowPhase, Screen, Scoreboard};
 
-pub struct Level14Plugin;
+pub struct Level102Plugin;
 
-impl Plugin for Level14Plugin {
+impl Plugin for Level102Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::MeadowChallenge), setup_meadow)
             .add_systems(
@@ -35,7 +35,7 @@ impl Plugin for Level14Plugin {
 
 // --- Components ---
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct MeadowEntity;
 
 #[derive(Component)]
@@ -72,6 +72,9 @@ struct RoundText;
 #[derive(Component)]
 struct CelebrationText;
 
+#[derive(Component)]
+struct DeepPitBeacon;
+
 // --- Resources ---
 
 #[derive(Resource)]
@@ -89,6 +92,7 @@ struct MeadowState {
     wave_origin: Vec3,
     goal_pos: Vec2,
     goal_peak: f32,
+    deep_pit_pos: Vec2,
 }
 
 // --- Constants ---
@@ -98,7 +102,11 @@ const CAM_OFFSET: Vec3 = Vec3::new(0.0, 22.0, 18.0);
 const AREA_HALF: f32 = 40.0;
 const CELL: f32 = 2.0;
 const GRID: i32 = 40;
-const Y_BASE: f32 = -4.0;
+const Y_BASE: f32 = -8.0;
+const COLUMN_THICKNESS: f32 = 4.0;
+const PLAYER_BODY_H: f32 = 1.8;
+const STEP_LIMIT: f32 = 1.5;
+const VOID_HR: f32 = -50.0;
 const HEIGHT_STEP: f32 = 0.2;
 const WAVE_SPREAD: f32 = 1.5;
 const MORPH_TIME: f32 = 1.5;
@@ -130,17 +138,29 @@ fn rng_usize(state: &mut u64, min: usize, max: usize) -> usize {
 struct TerrainFeature {
     cx: f32,
     cz: f32,
-    rx: f32,
-    rz: f32,
+    base_r: f32,
+    near_factor: f32, // along -dir (steep side)
+    far_factor: f32,  // along +dir (gentle, climbable side)
+    perp_factor: f32, // perpendicular radius factor
+    dir: Vec2,        // unit vector toward the gentle side
     height: f32,
 }
 
 fn height_at(x: f32, z: f32, features: &[TerrainFeature]) -> f32 {
     let mut h = 0.0_f32;
     for f in features {
-        let dx = (x - f.cx) / f.rx;
-        let dz = (z - f.cz) / f.rz;
-        let d2 = dx * dx + dz * dz;
+        let off = Vec2::new(x - f.cx, z - f.cz);
+        let along = off.dot(f.dir);
+        let perp_vec = off - f.dir * along;
+        let r_along = if along >= 0.0 {
+            f.base_r * f.far_factor
+        } else {
+            f.base_r * f.near_factor
+        };
+        let r_perp = f.base_r * f.perp_factor;
+        let dx = along / r_along;
+        let dy = perp_vec.length() / r_perp;
+        let d2 = dx * dx + dy * dy;
         if d2 < 1.0 {
             let t = d2.sqrt();
             h += f.height * 0.5 * (1.0 + (t * std::f32::consts::PI).cos());
@@ -163,43 +183,95 @@ fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn random_features(rng: &mut u64) -> Vec<TerrainFeature> {
+fn random_unit_dir(rng: &mut u64) -> Vec2 {
+    let angle = rng_f32(rng) * std::f32::consts::TAU;
+    Vec2::new(angle.cos(), angle.sin())
+}
+
+fn rotate(v: Vec2, angle: f32) -> Vec2 {
+    let (s, c) = angle.sin_cos();
+    Vec2::new(v.x * c - v.y * s, v.x * s + v.y * c)
+}
+
+/// Returns (features, deep_pit_position). The deep pit is the last entry
+/// in `features` and is the round's underground climb-out point.
+fn random_features(rng: &mut u64) -> (Vec<TerrainFeature>, Vec2) {
     let mut feats = Vec::new();
-    // Main hill (tallest)
-    let h = rng_range(rng, 3.0, 4.0);
-    let r = h * 6.5 + rng_range(rng, 2.0, 6.0);
+
+    // Main hill: tallest, gentle side biased toward player spawn so the flag
+    // is reachable from the natural starting approach.
+    let main_h = rng_range(rng, 4.0, 6.0);
+    let main_r = main_h * 2.5;
+    let main_cx = rng_range(rng, -22.0, 22.0);
+    let main_cz = rng_range(rng, -22.0, 22.0);
+    let toward_spawn = (Vec2::new(PLAYER_SPAWN.x, PLAYER_SPAWN.z) - Vec2::new(main_cx, main_cz))
+        .normalize_or_zero();
+    let jitter = rng_range(rng, -0.52, 0.52); // ±30°
+    let main_dir = rotate(toward_spawn, jitter);
     feats.push(TerrainFeature {
-        cx: rng_range(rng, -25.0, 25.0),
-        cz: rng_range(rng, -25.0, 25.0),
-        rx: r * rng_range(rng, 0.85, 1.15),
-        rz: r * rng_range(rng, 0.85, 1.15),
-        height: h,
+        cx: main_cx,
+        cz: main_cz,
+        base_r: main_r,
+        near_factor: 0.5,
+        far_factor: 2.5,
+        perp_factor: 0.9,
+        dir: if main_dir.length_squared() > 0.01 { main_dir.normalize() } else { Vec2::Y },
+        height: main_h,
     });
-    // 4-6 smaller hills
+
+    // 4-6 smaller asymmetric hills.
     for _ in 0..rng_usize(rng, 4, 6) {
-        let h = rng_range(rng, 0.6, 2.5);
-        let r = h * 6.5 + rng_range(rng, 2.0, 10.0);
+        let h = rng_range(rng, 1.5, 3.5);
         feats.push(TerrainFeature {
             cx: rng_range(rng, -32.0, 32.0),
             cz: rng_range(rng, -32.0, 32.0),
-            rx: r * rng_range(rng, 0.75, 1.3),
-            rz: r * rng_range(rng, 0.75, 1.3),
+            base_r: h * 2.5,
+            near_factor: rng_range(rng, 0.4, 0.6),
+            far_factor: rng_range(rng, 2.2, 2.8),
+            perp_factor: rng_range(rng, 0.8, 1.0),
+            dir: random_unit_dir(rng),
             height: h,
         });
     }
-    // 2-3 pits
+
+    // 2-3 surface pits (mud).
     for _ in 0..rng_usize(rng, 2, 3) {
-        let h = rng_range(rng, 0.8, 2.0);
-        let r = h * 6.5 + rng_range(rng, 2.0, 8.0);
+        let h = rng_range(rng, 2.0, 3.5);
         feats.push(TerrainFeature {
             cx: rng_range(rng, -30.0, 30.0),
             cz: rng_range(rng, -30.0, 30.0),
-            rx: r * rng_range(rng, 0.8, 1.2),
-            rz: r * rng_range(rng, 0.8, 1.2),
+            base_r: h * 2.5,
+            near_factor: rng_range(rng, 0.4, 0.6),
+            far_factor: rng_range(rng, 2.2, 2.8),
+            perp_factor: rng_range(rng, 0.8, 1.0),
+            dir: random_unit_dir(rng),
             height: -h,
         });
     }
-    feats
+
+    // Deep pit: bottom touches the underground floor; gentle slope is the
+    // climb-out from underground. Place away from main hill so the climb-out
+    // and the goal don't collide.
+    let mut deep_cx;
+    let mut deep_cz;
+    loop {
+        deep_cx = rng_range(rng, -28.0, 28.0);
+        deep_cz = rng_range(rng, -28.0, 28.0);
+        let dist = ((deep_cx - main_cx).powi(2) + (deep_cz - main_cz).powi(2)).sqrt();
+        if dist > 25.0 { break; }
+    }
+    feats.push(TerrainFeature {
+        cx: deep_cx,
+        cz: deep_cz,
+        base_r: 8.0,
+        near_factor: 0.5,
+        far_factor: 2.5,
+        perp_factor: 1.0,
+        dir: random_unit_dir(rng),
+        height: -8.0,
+    });
+
+    (feats, Vec2::new(deep_cx, deep_cz))
 }
 
 fn find_peak(feats: &[TerrainFeature]) -> (f32, f32, f32) {
@@ -218,6 +290,94 @@ fn find_peak(feats: &[TerrainFeature]) -> (f32, f32, f32) {
     best
 }
 
+/// Top-anchored slab geometry. Cells render at most COLUMN_THICKNESS thick,
+/// anchored at their top. The tail clamp keeps a 0.2 visible thickness when
+/// the column would otherwise collapse — matching CLAUDE.md's rule that
+/// `TerrainSurface.y` and the visible mesh top must come from the same value.
+/// Void cells (target_h <= VOID_HR + 1.0) render at their target_h with a
+/// 0.2 thickness, deep below the underground floor where they're occluded.
+fn cell_geometry(hr: f32) -> (f32 /* visual_top */, f32 /* col_h */, f32 /* center_y */) {
+    if hr <= VOID_HR + 1.0 {
+        // Void: keep visual_top wherever hr says, super-thin slab below floor.
+        let col_h = 0.2;
+        let visual_top = hr;
+        let center_y = visual_top - col_h / 2.0;
+        return (visual_top, col_h, center_y);
+    }
+    let visual_top = hr.max(Y_BASE + 0.2);
+    let col_h = COLUMN_THICKNESS.min(visual_top - Y_BASE).max(0.2);
+    let center_y = visual_top - col_h / 2.0;
+    (visual_top, col_h, center_y)
+}
+
+fn cell_center(gx: i32, gz: i32) -> Vec2 {
+    Vec2::new(
+        -AREA_HALF + CELL / 2.0 + gx as f32 * CELL,
+        -AREA_HALF + CELL / 2.0 + gz as f32 * CELL,
+    )
+}
+
+/// Select 3-5 pairs of grid indices to be pit-hole top-left corners. Each
+/// chosen position becomes a 2x2 hole. Filters keep holes on flat ground,
+/// away from goal/spawn/deep pit, and not adjacent to each other.
+fn select_pit_holes(
+    heights: &[f32],
+    rng: &mut u64,
+    goal_pos: Vec2,
+    deep_pit_pos: Vec2,
+    spawn_xz: Vec2,
+) -> Vec<(i32, i32)> {
+    let grid = GRID as usize;
+    let h_at = |gx: i32, gz: i32| -> f32 {
+        if gx < 0 || gx >= GRID || gz < 0 || gz >= GRID {
+            return f32::NAN;
+        }
+        heights[gz as usize * grid + gx as usize]
+    };
+
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    for gz in 1..GRID - 2 {
+        for gx in 1..GRID - 2 {
+            // 2x2 block + 1-cell flat buffer ring => 4x4 area must be near 0.
+            let mut flat = true;
+            'outer: for dz in -1..=2 {
+                for dx in -1..=2 {
+                    let h = h_at(gx + dx, gz + dz);
+                    if !h.is_finite() || h.abs() > STEP_LIMIT {
+                        flat = false;
+                        break 'outer;
+                    }
+                }
+            }
+            if !flat { continue; }
+
+            // 2x2 center is between (gx, gz) and (gx+1, gz+1)
+            let center = (cell_center(gx, gz) + cell_center(gx + 1, gz + 1)) * 0.5;
+            if (center - goal_pos).length() < 8.0 { continue; }
+            if (center - deep_pit_pos).length() < 12.0 { continue; }
+            if (center - spawn_xz).length() < 10.0 { continue; }
+
+            candidates.push((gx, gz));
+        }
+    }
+
+    let target = rng_usize(rng, 3, 5);
+    let mut selected: Vec<(i32, i32)> = Vec::new();
+    while selected.len() < target && !candidates.is_empty() {
+        let i = (rng_next(rng) as usize) % candidates.len();
+        let pick = candidates.swap_remove(i);
+        // Keep holes apart so they don't merge into one big drop zone.
+        let pick_center = (cell_center(pick.0, pick.1) + cell_center(pick.0 + 1, pick.1 + 1)) * 0.5;
+        let too_close = selected.iter().any(|(sx, sz)| {
+            let sc = (cell_center(*sx, *sz) + cell_center(*sx + 1, *sz + 1)) * 0.5;
+            (sc - pick_center).length() < 8.0
+        });
+        if too_close { continue; }
+        selected.push(pick);
+    }
+    selected
+}
+
 // --- Setup ---
 
 fn setup_meadow(
@@ -226,7 +386,7 @@ fn setup_meadow(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.5, 0.78, 0.95)));
-    commands.insert_resource(GroundYOverride(-5.0));
+    commands.insert_resource(GroundYOverride(Y_BASE));
 
     let bands: [Handle<StandardMaterial>; 6] = [
         materials.add(StandardMaterial { base_color: Color::srgb(0.4, 0.28, 0.15), ..default() }),
@@ -244,8 +404,28 @@ fn setup_meadow(
         .as_nanos() as u64;
     let mut rng = seed | 1;
 
-    let feats = random_features(&mut rng);
+    let (feats, deep_pit_pos) = random_features(&mut rng);
     let (peak_x, peak_z, peak_h) = find_peak(&feats);
+
+    // Pre-compute heights per cell so we can run pit-hole filtering on a
+    // realized terrain rather than re-evaluating height_at per filter step.
+    let grid = GRID as usize;
+    let mut heights = vec![0.0_f32; grid * grid];
+    for gz in 0..GRID {
+        for gx in 0..GRID {
+            let pos = cell_center(gx, gz);
+            let h = height_at(pos.x, pos.y, &feats);
+            heights[gz as usize * grid + gx as usize] = (h / HEIGHT_STEP).round() * HEIGHT_STEP;
+        }
+    }
+
+    let pit_holes = select_pit_holes(
+        &heights,
+        &mut rng,
+        Vec2::new(peak_x, peak_z),
+        deep_pit_pos,
+        Vec2::new(PLAYER_SPAWN.x, PLAYER_SPAWN.z),
+    );
 
     commands.insert_resource(MeadowState {
         rng,
@@ -256,38 +436,75 @@ fn setup_meadow(
         wave_origin: PLAYER_SPAWN,
         goal_pos: Vec2::new(peak_x, peak_z),
         goal_peak: peak_h,
+        deep_pit_pos,
     });
 
     // Shared unit mesh for all terrain cells
     let unit_mesh = meshes.add(Cuboid::new(CELL, 1.0, CELL));
 
-    // Generate grid
+    // Stamp pit holes onto the height grid (the 2x2 anchored at each pick).
+    let is_pit_hole = |gx: i32, gz: i32| -> bool {
+        pit_holes.iter().any(|(px, pz)| {
+            (gx == *px || gx == *px + 1) && (gz == *pz || gz == *pz + 1)
+        })
+    };
+
     for gz in 0..GRID {
         for gx in 0..GRID {
-            let cx = -AREA_HALF + CELL / 2.0 + gx as f32 * CELL;
-            let cz = -AREA_HALF + CELL / 2.0 + gz as f32 * CELL;
-            let h = height_at(cx, cz, &feats);
-            let hr = (h / HEIGHT_STEP).round() * HEIGHT_STEP;
-            let col_h = (hr - Y_BASE).max(0.2);
-            // Collision top must equal visual top. If hr is so low that col_h
-            // got clamped, the cell visually sits at Y_BASE + col_h, not hr.
-            let visual_top = Y_BASE + col_h;
+            let pos = cell_center(gx, gz);
+            let hr = if is_pit_hole(gx, gz) {
+                VOID_HR
+            } else {
+                heights[gz as usize * grid + gx as usize]
+            };
+            let (visual_top, col_h, center_y) = cell_geometry(hr);
 
             commands.spawn((
                 Mesh3d(unit_mesh.clone()),
                 MeshMaterial3d(bands[height_band(hr)].clone()),
-                Transform::from_xyz(cx, Y_BASE + col_h / 2.0, cz)
+                Transform::from_xyz(pos.x, center_y, pos.y)
                     .with_scale(Vec3::new(1.0, col_h, 1.0)),
                 TerrainSurface {
-                    min: Vec2::new(cx - CELL / 2.0, cz - CELL / 2.0),
-                    max: Vec2::new(cx + CELL / 2.0, cz + CELL / 2.0),
+                    min: Vec2::new(pos.x - CELL / 2.0, pos.y - CELL / 2.0),
+                    max: Vec2::new(pos.x + CELL / 2.0, pos.y + CELL / 2.0),
                     y: visual_top,
                 },
-                TerrainCell { cx, cz, current_h: hr, target_h: hr },
+                TerrainCell { cx: pos.x, cz: pos.y, current_h: hr, target_h: hr },
                 MeadowEntity,
             ));
         }
     }
+
+    // Underground floor: a single dirt-colored plane at Y_BASE. Required by
+    // CLAUDE.md whenever GroundYOverride sits below visible cells, and
+    // serves as the navigable floor when the player drops through a pit hole.
+    let underground_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.18, 0.12),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(AREA_HALF * 2.0, 0.4, AREA_HALF * 2.0))),
+        MeshMaterial3d(underground_mat),
+        Transform::from_xyz(0.0, Y_BASE - 0.2, 0.0),
+        MeadowEntity,
+    ));
+
+    // Cyan beacon over the deep pit — visible from underground so the player
+    // knows where to head to climb out.
+    let beacon_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.0, 0.9, 1.0),
+        emissive: LinearRgba::new(0.0, 4.0, 5.0, 1.0),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.6, (Y_BASE.abs()) + 1.0, 0.6))),
+        MeshMaterial3d(beacon_mat),
+        Transform::from_xyz(deep_pit_pos.x, Y_BASE / 2.0 + 0.5, deep_pit_pos.y),
+        DeepPitBeacon,
+        MeadowEntity,
+    ));
 
     // Flag
     let brown = materials.add(StandardMaterial { base_color: Color::srgb(0.55, 0.35, 0.2), ..default() });
@@ -395,7 +612,7 @@ fn setup_meadow(
             TextColor(Color::srgb(0.9, 0.9, 0.5)), RoundText, MeadowEntity,
         ));
     });
-    shared_ui::spawn_controls_hint(&mut commands, "[ESC] Menu  |  [WASD] Move  |  [Space] Jump  |  [P] Pause", MeadowEntity);
+    shared_ui::spawn_controls_hint(&mut commands, "Reach the flag", MeadowEntity);
 }
 
 // --- Terrain collision ---
@@ -407,9 +624,66 @@ fn terrain_collision(
 ) {
     let Ok((mut transform, mut physics, mut squash)) = player_q.get_single_mut() else { return };
     let was_airborne = !physics.grounded;
+    let dt = time.delta_secs();
+
+    // Horizontal pushout — keep the player out of any cell column that's too
+    // tall to step onto. Cells render as top-anchored COLUMN_THICKNESS-thick
+    // slabs (clamped to Y_BASE), and we model the same shape for collision so
+    // that the underground (well below visual_top - COLUMN_THICKNESS) stays
+    // free even where ground cells exist above. Pattern adapted from
+    // src/level13/terrain.rs:21–67.
+    let margin = 0.4;
+    for _ in 0..3 {
+        let mut pushed = false;
+        let px = transform.translation.x;
+        let pz = transform.translation.z;
+        let py = transform.translation.y;
+        for surf in &surfaces {
+            // Skip degenerate / void cells (anchored at or below floor).
+            if surf.y <= Y_BASE + 0.1 { continue; }
+            // On top of the slab — let the snap/step logic handle vertical state.
+            if py >= surf.y - 0.05 { continue; }
+            // Step-up zone: handled below by snap, no horizontal push.
+            if py >= surf.y - STEP_LIMIT { continue; }
+
+            let col_bottom = (surf.y - COLUMN_THICKNESS).max(Y_BASE);
+            let body_top = py + PLAYER_BODY_H;
+            let v_overlap = body_top.min(surf.y) - py.max(col_bottom);
+            if v_overlap < 0.3 { continue; }
+
+            // XZ AABB check
+            if !(px + margin > surf.min.x && px - margin < surf.max.x
+                && pz + margin > surf.min.y && pz - margin < surf.max.y)
+            {
+                continue;
+            }
+
+            let push_left = (px + margin) - surf.min.x;
+            let push_right = surf.max.x - (px - margin);
+            let push_front = (pz + margin) - surf.min.y;
+            let push_back = surf.max.y - (pz - margin);
+            let min_push = push_left.min(push_right).min(push_front).min(push_back);
+
+            if min_push == push_left {
+                transform.translation.x = surf.min.x - margin;
+                physics.velocity.x = physics.velocity.x.min(0.0);
+            } else if min_push == push_right {
+                transform.translation.x = surf.max.x + margin;
+                physics.velocity.x = physics.velocity.x.max(0.0);
+            } else if min_push == push_front {
+                transform.translation.z = surf.min.y - margin;
+                physics.velocity.z = physics.velocity.z.min(0.0);
+            } else {
+                transform.translation.z = surf.max.y + margin;
+                physics.velocity.z = physics.velocity.z.max(0.0);
+            }
+            pushed = true;
+        }
+        if !pushed { break; }
+    }
+
     let px = transform.translation.x;
     let pz = transform.translation.z;
-    let dt = time.delta_secs();
 
     // Previous-frame position. player_movement already advanced the transform
     // by `velocity * dt`, so subtracting it back gives where the player was
@@ -514,7 +788,7 @@ fn goal_check(
             && tf.translation.z >= goal.min.y && tf.translation.z <= goal.max.y
             && tf.translation.y >= goal.y
         {
-            scoreboard.set_solved(14);
+            scoreboard.set_solved(102);
             state.needs_regen = true;
             return;
         }
@@ -528,15 +802,16 @@ fn terrain_transition_system(
     time: Res<Time>,
     mut state: ResMut<MeadowState>,
     mats: Res<TerrainMaterials>,
-    player_q: Query<&Transform, (With<Player>, Without<TerrainCell>, Without<FlagEntity>)>,
+    player_q: Query<&Transform, (With<Player>, Without<TerrainCell>, Without<FlagEntity>, Without<DeepPitBeacon>)>,
     mut cells: Query<
         (&mut Transform, &mut TerrainSurface, &mut TerrainCell, &mut MeshMaterial3d<StandardMaterial>),
-        (Without<FlagEntity>, Without<Player>),
+        (Without<FlagEntity>, Without<Player>, Without<DeepPitBeacon>),
     >,
-    mut flag_q: Query<(&mut Transform, &FlagEntity), (Without<TerrainCell>, Without<Player>)>,
+    mut flag_q: Query<(&mut Transform, &FlagEntity), (Without<TerrainCell>, Without<Player>, Without<DeepPitBeacon>)>,
     mut goal_q: Query<&mut GoalZone>,
     mut round_text: Query<&mut Text, With<RoundText>>,
     celeb_q: Query<Entity, With<CelebrationText>>,
+    mut beacon_q: Query<&mut Transform, (With<DeepPitBeacon>, Without<TerrainCell>, Without<Player>, Without<FlagEntity>)>,
 ) {
     // Handle regeneration request
     if state.needs_regen {
@@ -548,18 +823,50 @@ fn terrain_transition_system(
             state.wave_origin = ptf.translation;
         }
 
-        let feats = random_features(&mut state.rng);
+        let (feats, deep_pit_pos) = random_features(&mut state.rng);
         let (px, pz, ph) = find_peak(&feats);
 
-        // Set new targets
-        for (_, _, mut cell, _) in &mut cells {
-            let new_h = height_at(cell.cx, cell.cz, &feats);
-            cell.target_h = (new_h / HEIGHT_STEP).round() * HEIGHT_STEP;
+        // Pre-compute heights for pit-hole filtering.
+        let grid = GRID as usize;
+        let mut heights = vec![0.0_f32; grid * grid];
+        for gz in 0..GRID {
+            for gx in 0..GRID {
+                let pos = cell_center(gx, gz);
+                let h = height_at(pos.x, pos.y, &feats);
+                heights[gz as usize * grid + gx as usize] = (h / HEIGHT_STEP).round() * HEIGHT_STEP;
+            }
         }
 
-        // Update goal
+        let pit_holes = select_pit_holes(
+            &heights,
+            &mut state.rng,
+            Vec2::new(px, pz),
+            deep_pit_pos,
+            Vec2::new(PLAYER_SPAWN.x, PLAYER_SPAWN.z),
+        );
+        let is_pit_hole = |gx: i32, gz: i32| -> bool {
+            pit_holes.iter().any(|(p_gx, p_gz)| {
+                (gx == *p_gx || gx == *p_gx + 1) && (gz == *p_gz || gz == *p_gz + 1)
+            })
+        };
+
+        // Set new targets per cell — pit holes get the void sentinel so the
+        // morph drops them below the underground floor where they vanish.
+        for (_, _, mut cell, _) in &mut cells {
+            let gx = ((cell.cx + AREA_HALF - CELL / 2.0) / CELL).round() as i32;
+            let gz = ((cell.cz + AREA_HALF - CELL / 2.0) / CELL).round() as i32;
+            let target = if is_pit_hole(gx, gz) {
+                VOID_HR
+            } else {
+                heights[gz as usize * grid + gx as usize]
+            };
+            cell.target_h = target;
+        }
+
+        // Update goal & deep pit position
         state.goal_pos = Vec2::new(px, pz);
         state.goal_peak = ph;
+        state.deep_pit_pos = deep_pit_pos;
         if let Ok(mut goal) = goal_q.get_single_mut() {
             goal.min = Vec2::new(px - 2.5, pz - 2.5);
             goal.max = Vec2::new(px + 2.5, pz + 2.5);
@@ -614,13 +921,14 @@ fn terrain_transition_system(
 
         let h = cell.current_h + (cell.target_h - cell.current_h) * cell_t;
         let hr = (h / HEIGHT_STEP).round() * HEIGHT_STEP;
-        let col_h = (hr - Y_BASE).max(0.2);
-        let visual_top = Y_BASE + col_h;
+        let (visual_top, col_h, center_y) = cell_geometry(hr);
 
-        tf.translation.y = Y_BASE + col_h / 2.0;
+        tf.translation.y = center_y;
         tf.scale.y = col_h;
         surface.y = visual_top;
-        material.0 = mats.bands[height_band(hr)].clone();
+        // Use the band of the *clamped* height so void cells use a dirt color.
+        let band_h = if hr <= VOID_HR + 1.0 { Y_BASE } else { hr };
+        material.0 = mats.bands[height_band(band_h)].clone();
 
         // Track goal cell height
         if (cell.cx - state.goal_pos.x).abs() < CELL * 0.6
@@ -635,6 +943,12 @@ fn terrain_transition_system(
         tf.translation.x = state.goal_pos.x + flag.x_offset;
         tf.translation.z = state.goal_pos.y;
         tf.translation.y = goal_terrain_h + flag.y_above;
+    }
+
+    // Slide the cyan beacon to the new deep pit position (rides during transition)
+    if let Ok(mut tf) = beacon_q.get_single_mut() {
+        tf.translation.x = state.deep_pit_pos.x;
+        tf.translation.z = state.deep_pit_pos.y;
     }
 
     // Despawn celebration text after 2.5s

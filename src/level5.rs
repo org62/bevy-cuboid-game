@@ -19,7 +19,7 @@ impl Plugin for Level5Plugin {
             )
             .add_systems(
                 Update,
-                escape_to_menu.run_if(in_state(RacePhase::Countdown)),
+                (escape_to_menu, toggle_pause).run_if(in_state(RacePhase::Countdown)),
             )
             .add_systems(
                 Update,
@@ -51,7 +51,7 @@ impl Plugin for Level5Plugin {
 
 // --- Components ---
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct RaceEntity;
 
 #[derive(Component)]
@@ -60,12 +60,14 @@ struct RaceFollowCam;
 #[derive(Component)]
 struct AiRacer {
     lane: u8,
-    progress: f32,
     speed_multiplier: f32,
+    color: Color,
 }
 
+/// One row of the standings HUD. `0` is the row slot (0 = leader), rewritten
+/// and recolored every frame from the sorted racer list.
 #[derive(Component)]
-struct RaceHudText;
+struct RaceHudRow(usize);
 
 #[derive(Component)]
 struct CountdownText;
@@ -84,14 +86,14 @@ struct RaceSeed(u32);
 #[repr(C)]
 #[derive(Resource)]
 pub struct RacerStats {
-    pub player_speed: f32,
+    /// Speed the AI racers advance at. This is the only "rule" the player can
+    /// weaken to win by slowing the field down.
     pub ai_speed: f32,
 }
 
 impl Default for RacerStats {
     fn default() -> Self {
         Self {
-            player_speed: 7.0,
             ai_speed: 7.0,
         }
     }
@@ -113,11 +115,6 @@ impl Default for PlayerRaceState {
 // --- Debugger-target functions ---
 
 #[inline(never)]
-fn compute_player_race_speed(stats: &RacerStats) -> f32 {
-    stats.player_speed
-}
-
-#[inline(never)]
 fn compute_ai_race_speed(stats: &RacerStats) -> f32 {
     stats.ai_speed
 }
@@ -136,6 +133,7 @@ const TRACK_WIDTH: f32 = 8.0;
 #[cfg(test)]
 const LANE_COUNT: usize = 4; // 3 AI + 1 player
 const PLAYER_LANE_X: f32 = 3.0; // rightmost lane center
+const PLAYER_COLOR: Color = Color::srgb(1.0, 0.45, 0.35); // matches spawn_player coral
 const ARENA_MIN: Vec2 = Vec2::new(-6.0, -150.0);
 const ARENA_MAX: Vec2 = Vec2::new(6.0, 4.0);
 const PLAYER_SPAWN: Vec3 = Vec3::new(PLAYER_LANE_X, 0.0, TRACK_START_Z);
@@ -148,6 +146,7 @@ fn random_ai_multiplier(seed: u32) -> f32 {
     1.05 + frac * 0.10
 }
 
+#[inline(never)]
 fn track_position(progress: f32, lane_x: f32) -> Vec3 {
     Vec3::new(
         lane_x,
@@ -156,6 +155,7 @@ fn track_position(progress: f32, lane_x: f32) -> Vec3 {
     )
 }
 
+#[inline(never)]
 fn progress_from_position(pos: Vec3) -> f32 {
     ((TRACK_START_Z - pos.z) / TRACK_LENGTH).clamp(0.0, 1.0)
 }
@@ -281,8 +281,8 @@ fn setup_race(
                 Visibility::default(),
                 AiRacer {
                     lane: i as u8,
-                    progress: 0.0,
                     speed_multiplier: random_ai_multiplier(i as u32),
+                    color,
                 },
                 RaceEntity,
             ))
@@ -331,14 +331,18 @@ fn setup_race(
         RaceEntity,
     );
 
-    // HUD
+    // HUD — live standings: one row per racer (progress + position), sorted by
+    // race position each frame and tinted with each racer's own color.
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(16.0),
                 left: Val::Px(16.0),
-                padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                padding: UiRect::axes(Val::Px(16.0), Val::Px(10.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                min_width: Val::Px(280.0),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.1, 0.1, 0.2, 0.85)),
@@ -347,17 +351,25 @@ fn setup_race(
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("Pos: 4th | 0%"),
-                TextFont { font_size: 22.0, ..default() },
-                TextColor(Color::srgb(1.0, 1.0, 1.0)),
-                RaceHudText,
+                Text::new("STANDINGS"),
+                TextFont { font_size: 16.0, ..default() },
+                TextColor(Color::srgb(0.7, 0.7, 0.8)),
             ));
+            // 4 rows: 3 AI + player.
+            for slot in 0..4 {
+                parent.spawn((
+                    Text::new(""),
+                    TextFont { font_size: 18.0, ..default() },
+                    TextColor(Color::WHITE),
+                    RaceHudRow(slot),
+                ));
+            }
         });
 
     // Controls
     shared_ui::spawn_controls_hint(
         &mut commands,
-        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        "Win the race",
         RaceEntity,
     );
 
@@ -389,8 +401,8 @@ fn setup_race(
     if !scoreboard.is_solved(5) {
         shared_ui::spawn_hint_box(
             &mut commands,
-            "The race is rigged -- the numbers are stacked against you. A RacerStats resource controls everything: speeds, laps. What if you could rewrite the rules?",
-            280.0,
+            "You can't out-drive the AI head-on. But your finish is judged only by how far you are down the track. Find the coordinate that changes as you drive (like the maze's height trick) and move yourself to the finish line -- or find the value that drives the AI and weaken it.",
+            300.0,
             RaceEntity,
         );
     }
@@ -430,7 +442,9 @@ fn countdown_update(
     mut commands: Commands,
     mut text_q: Query<&mut Text, With<CountdownText>>,
     countdown_entities: Query<Entity, (With<CountdownText>, With<Node>)>,
+    game_paused: Res<GamePaused>,
 ) {
+    if game_paused.0 { return; }
     countdown.timer.tick(time.delta());
     if countdown.timer.just_finished() {
         if countdown.stage == 0 {
@@ -454,7 +468,7 @@ fn countdown_update(
 }
 
 // --- Gameplay ---
-
+#[inline(never)]
 fn race_playing_update(
     time: Res<Time>,
     stats: Res<RacerStats>,
@@ -463,61 +477,86 @@ fn race_playing_update(
     mut player_race: ResMut<PlayerRaceState>,
     mut next_phase: ResMut<NextState<RacePhase>>,
     player_q: Query<&Transform, (With<Player>, Without<AiRacer>)>,
-    mut ai_q: Query<(&mut AiRacer, &mut Transform), Without<Player>>,
+    mut ai_q: Query<(&AiRacer, &mut Transform), Without<Player>>,
     game_paused: Res<GamePaused>,
     mut power_up_state: Option<ResMut<PowerUpState>>,
 ) {
     if game_paused.0 { return; }
 
-    // Easter egg: ? key gives 2x speed boost
-    let has_boost = power_up_state.as_ref().map_or(false, |p| p.speed_multiplier > 0.0);
-    if !has_boost {
-        for event in key_events.read() {
-            if event.state.is_pressed() {
-                if let bevy::input::keyboard::Key::Character(ref ch) = event.logical_key {
-                    if ch.as_str() == "?" {
-                        if let Some(ref mut state) = power_up_state {
-                            state.speed_multiplier = 2.0;
-                        } else {
-                            commands.insert_resource(PowerUpState { speed_multiplier: 2.0, ..default() });
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    handle_boost_easter_egg(&mut commands, &mut key_events, &mut power_up_state);
+
     let dt = time.delta_secs();
 
-    // Update player race progress from position
-    if let Ok(pt) = player_q.get_single() {
-        player_race.progress = progress_from_position(pt.translation);
-    }
-
-    // Check player victory
+    update_player_progress(&player_q, &mut player_race);
     if check_race_finished(player_race.progress) {
         next_phase.set(RacePhase::Victory);
         return;
     }
 
-    // Update AI racers
-    let _player_speed = compute_player_race_speed(&stats);
-    let base_speed = compute_ai_race_speed(&stats);
+    if advance_ai_racers(&stats, &mut ai_q, dt) {
+        next_phase.set(RacePhase::Lost);
+        return;
+    }
+}
 
-    for (mut ai, mut t) in &mut ai_q {
-        let speed_factor = (base_speed * ai.speed_multiplier) / TRACK_LENGTH;
-        ai.progress += speed_factor * dt;
-
-        let lane_x = AI_LANE_XS[ai.lane as usize];
-        let pos = track_position(ai.progress, lane_x);
-        t.translation = Vec3::new(pos.x, 0.0, pos.z);
-
-        // Check AI victory
-        if check_race_finished(ai.progress) {
-            next_phase.set(RacePhase::Lost);
-            return;
+/// Easter egg: pressing `?` (once) grants a 2x speed boost via `PowerUpState`.
+#[inline(never)]
+fn handle_boost_easter_egg(
+    commands: &mut Commands,
+    key_events: &mut EventReader<KeyboardInput>,
+    power_up_state: &mut Option<ResMut<PowerUpState>>,
+) {
+    let has_boost = power_up_state.as_ref().map_or(false, |p| p.speed_multiplier > 0.0);
+    if has_boost {
+        return;
+    }
+    for event in key_events.read() {
+        if event.state.is_pressed() {
+            if let bevy::input::keyboard::Key::Character(ref ch) = event.logical_key {
+                if ch.as_str() == "?" {
+                    if let Some(state) = power_up_state.as_mut() {
+                        state.speed_multiplier = 2.0;
+                    } else {
+                        commands.insert_resource(PowerUpState { speed_multiplier: 2.0, ..default() });
+                    }
+                    break;
+                }
+            }
         }
     }
+}
+
+/// Derive the player's race progress from their current position (position is
+/// the single source of truth for every racer).
+#[inline(never)]
+fn update_player_progress(
+    player_q: &Query<&Transform, (With<Player>, Without<AiRacer>)>,
+    player_race: &mut PlayerRaceState,
+) {
+    if let Ok(pt) = player_q.get_single() {
+        player_race.progress = progress_from_position(pt.translation);
+    }
+}
+
+/// Advance every AI racer down the track by its speed. Returns `true` if any AI
+/// crossed the finish line this frame (i.e. the player has lost).
+#[inline(never)]
+fn advance_ai_racers(
+    stats: &RacerStats,
+    ai_q: &mut Query<(&AiRacer, &mut Transform), Without<Player>>,
+    dt: f32,
+) -> bool {
+    let base_speed = compute_ai_race_speed(stats);
+    for (ai, mut t) in ai_q.iter_mut() {
+        // World units per second, same units as the player's movement speed.
+        let speed = base_speed * ai.speed_multiplier;
+        t.translation.z -= speed * dt;
+
+        if check_race_finished(progress_from_position(t.translation)) {
+            return true;
+        }
+    }
+    false
 }
 
 // --- Visual ---
@@ -525,10 +564,10 @@ fn race_playing_update(
 fn race_visual_update(
     time: Res<Time>,
     player_race: Res<PlayerRaceState>,
-    player_q: Query<&Transform, (With<Player>, Without<RaceFollowCam>)>,
-    mut camera_q: Query<&mut Transform, (With<RaceFollowCam>, Without<Player>)>,
-    mut text_q: Query<&mut Text, With<RaceHudText>>,
-    ai_q: Query<&AiRacer>,
+    player_q: Query<&Transform, (With<Player>, Without<RaceFollowCam>, Without<AiRacer>)>,
+    mut camera_q: Query<&mut Transform, (With<RaceFollowCam>, Without<Player>, Without<AiRacer>)>,
+    ai_q: Query<(&AiRacer, &Transform), (Without<Player>, Without<RaceFollowCam>)>,
+    mut row_q: Query<(&mut Text, &mut TextColor, &RaceHudRow)>,
 ) {
     let dt = time.delta_secs();
 
@@ -540,22 +579,28 @@ fn race_visual_update(
         ct.look_at(pt.translation + Vec3::new(0.0, 0.0, -4.0), Vec3::Y);
     }
 
-    // HUD
-    if let Ok(mut text) = text_q.get_single_mut() {
-        let mut position = 1;
-        for ai in &ai_q {
-            if ai.progress > player_race.progress {
-                position += 1;
-            }
+    // Collect every racer: (label, color, progress, position).
+    let mut rows: Vec<(String, Color, f32, Vec3)> = Vec::new();
+    if let Ok(pt) = player_q.get_single() {
+        rows.push(("You".to_string(), PLAYER_COLOR, player_race.progress, pt.translation));
+    }
+    for (ai, t) in &ai_q {
+        let progress = progress_from_position(t.translation);
+        rows.push((format!("AI {}", ai.lane + 1), ai.color, progress, t.translation));
+    }
+
+    // Sort by race position: furthest progress first.
+    rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Fill each HUD slot with the racer at that standing, in their own color.
+    for (mut text, mut color, slot) in &mut row_q {
+        if let Some((label, c, progress, _pos)) = rows.get(slot.0) {
+            let pct = (progress * 100.0).min(100.0);
+            **text = format!("{}. {}  {:.0}%", slot.0 + 1, label, pct);
+            color.0 = *c;
+        } else {
+            **text = String::new();
         }
-        let pos_str = match position {
-            1 => "1st",
-            2 => "2nd",
-            3 => "3rd",
-            _ => "4th",
-        };
-        let pct = (player_race.progress * 100.0).min(100.0) as u32;
-        **text = format!("Pos: {} | {}%", pos_str, pct);
     }
 }
 
@@ -626,7 +671,6 @@ fn handle_lost(
         commands.remove_resource::<PowerUpState>();
         race_seed.0 += 1;
         for (mut ai, mut t) in &mut ai_q {
-            ai.progress = 0.0;
             ai.speed_multiplier = random_ai_multiplier(race_seed.0 * 3 + ai.lane as u32);
             let lane_x = AI_LANE_XS[ai.lane as usize];
             let pos = track_position(0.0, lane_x);
@@ -659,12 +703,15 @@ fn cleanup_race(mut commands: Commands, query: Query<Entity, With<RaceEntity>>) 
 mod tests {
     use super::*;
 
+    // The player's top speed is the engine's MAX_SPEED (private to player.rs).
+    const PLAYER_MAX_SPEED: f32 = 7.0;
+
     #[test]
-    fn player_speed_is_rigged() {
+    fn ai_speed_matches_player_baseline() {
         let stats = RacerStats::default();
-        assert_eq!(compute_player_race_speed(&stats), 7.0);
-        assert_eq!(compute_ai_race_speed(&stats), 7.0);
-        // AI base speed equals player speed; multiplier makes them 1.05-1.15x faster
+        // AI base speed equals the player's top speed; the per-racer multiplier
+        // (1.05-1.15x) is what makes the field faster than the player.
+        assert_eq!(compute_ai_race_speed(&stats), PLAYER_MAX_SPEED);
         for seed in 0..100 {
             let m = random_ai_multiplier(seed);
             assert!(m >= 1.05 && m <= 1.15, "multiplier {m} out of range for seed {seed}");
@@ -686,18 +733,10 @@ mod tests {
         // Any AI racer with multiplier > 1.0 is faster than player
         let min_mult = 1.05_f32;
         let ai_time = TRACK_LENGTH / (stats.ai_speed * min_mult);
-        let player_time = TRACK_LENGTH / stats.player_speed;
+        let player_time = TRACK_LENGTH / PLAYER_MAX_SPEED;
 
         assert!(ai_time < player_time,
             "AI finishes in {:.1}s, player in {:.1}s", ai_time, player_time);
-    }
-
-    #[test]
-    fn debugger_scenario_boost_player_speed() {
-        let mut stats = RacerStats::default();
-        stats.player_speed = 50.0;
-        assert_eq!(compute_player_race_speed(&stats), 50.0);
-        assert!(stats.player_speed > stats.ai_speed);
     }
 
     #[test]
@@ -705,7 +744,8 @@ mod tests {
         let mut stats = RacerStats::default();
         stats.ai_speed = 1.0;
         assert_eq!(compute_ai_race_speed(&stats), 1.0);
-        assert!(stats.player_speed > stats.ai_speed);
+        // Slower than the player's top speed, so the player can now finish first.
+        assert!(stats.ai_speed < PLAYER_MAX_SPEED);
     }
 
     #[test]

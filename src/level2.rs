@@ -8,6 +8,21 @@ use crate::player::{
 use crate::shared_ui;
 use crate::{CannonPhase, GamePaused, Screen, Scoreboard};
 
+/// Long-form walkthrough shown in the tutorial modal (opened with T).
+const HEALTH_TUTORIAL: &str = "\
+You start at 10 HP and items heal only up to 99, but winning needs 100 - so you must set your health in memory.
+
+Approach 1 - memory search (health is an f32):
+1) Read your current HP from the HUD (e.g. 10).
+2) Search memory for that number as a 4-byte float.
+3) Take a hit (-1) or grab an item (+1), then search again for the new value. Repeat until one address is left.
+4) That address is PlayerHealth.current. Set it to 100. You win the instant it reaches 100.
+
+Approach 2 - breakpoint on the check:
+1) Break on check_health_victory (or apply_cannon_damage).
+2) Inspect the PlayerHealth argument - current is an f32.
+3) Set current = 100.0 and continue.";
+
 pub struct Level2Plugin;
 
 impl Plugin for Level2Plugin {
@@ -29,7 +44,7 @@ impl Plugin for Level2Plugin {
                     animate_player,
                     cannon_visual_update,
                     shared_ui::follow_camera_system,
-                    shared_ui::dismiss_hint,
+                    shared_ui::hint_tutorial_controls,
                 )
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::CannonChallenge)),
@@ -52,7 +67,7 @@ impl Plugin for Level2Plugin {
 
 // --- Components ---
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct CannonEntity;
 
 #[derive(Component)]
@@ -80,12 +95,12 @@ struct HurtFlash;
 #[repr(C)]
 #[derive(Resource)]
 pub struct PlayerHealth {
-    pub current: i32,
+    pub current: f32,
 }
 
 impl Default for PlayerHealth {
     fn default() -> Self {
-        Self { current: 100 }
+        Self { current: START_HP }
     }
 }
 
@@ -110,10 +125,13 @@ struct ProjectileAssets {
 const ARENA_MIN: Vec2 = Vec2::new(-8.0, -6.0);
 const ARENA_MAX: Vec2 = Vec2::new(8.0, 6.0);
 const CANNON_POS: Vec3 = Vec3::new(0.0, 0.0, -3.0);
-const DAMAGE_PER_HIT: i32 = 10;
-const HEAL_AMOUNT: i32 = 10;
-const MAX_HEAL_HP: i32 = 100;
-const WIN_HP: i32 = 1000;
+const START_HP: f32 = 10.0;
+const DAMAGE_PER_HIT: f32 = 1.0;
+const HEAL_AMOUNT: f32 = 1.0;
+// Healing from items caps here (one below the win threshold), so the goal is
+// unreachable through normal play — it needs the debugger.
+const MAX_HEAL_HP: f32 = 99.0;
+const WIN_HP: f32 = 100.0;
 const PLAYER_SPAWN: Vec3 = Vec3::new(0.0, 0.0, 4.0);
 const PROJECTILE_SPEED: f32 = 8.0;
 const FIRE_INTERVAL: f32 = 2.0;
@@ -126,15 +144,15 @@ fn check_health_victory(health: &PlayerHealth) -> bool {
 }
 
 #[inline(never)]
-fn apply_cannon_damage(health: &mut PlayerHealth, damage: i32) {
+fn apply_cannon_damage(health: &mut PlayerHealth, damage: f32) {
     health.current -= damage;
-    if health.current < 0 {
-        health.current = 0;
+    if health.current < 0.0 {
+        health.current = 0.0;
     }
 }
 
 #[inline(never)]
-fn collect_health_cube(health: &mut PlayerHealth, heal_amount: i32) {
+fn collect_health_cube(health: &mut PlayerHealth, heal_amount: f32) {
     health.current += heal_amount;
     if health.current > MAX_HEAL_HP {
         health.current = MAX_HEAL_HP;
@@ -147,7 +165,7 @@ fn setup_cannon_arena(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    scoreboard: Res<Scoreboard>,
+    _scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.45, 0.55, 0.65)));
     commands.insert_resource(PlayerHealth::default());
@@ -276,7 +294,7 @@ fn setup_cannon_arena(
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("HP: 100"),
+                Text::new("HP: 10"),
                 TextFont { font_size: 22.0, ..default() },
                 TextColor(Color::srgb(1.0, 1.0, 1.0)),
                 HealthHudText,
@@ -286,19 +304,23 @@ fn setup_cannon_arena(
     // HUD - controls hint
     shared_ui::spawn_controls_hint(
         &mut commands,
-        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        "Reach 100 health",
         CannonEntity,
     );
 
-    // HUD - hint box
-    if !scoreboard.is_solved(2) {
-        shared_ui::spawn_hint_box(
-            &mut commands,
-            "To win, you need 1000 points of health.",
-            260.0,
-            CannonEntity,
-        );
-    }
+    // HUD - hint box + tutorial modal (hidden; H reveals the hint, T the tutorial)
+    shared_ui::spawn_hint_box_with_tutorial(
+        &mut commands,
+        "Find the memory cell that holds your health and set it to 100.",
+        320.0,
+        CannonEntity,
+    );
+    shared_ui::spawn_hint_modal(
+        &mut commands,
+        "Health - Full Solution",
+        HEALTH_TUTORIAL,
+        CannonEntity,
+    );
 }
 
 fn spawn_health_cubes(
@@ -445,7 +467,7 @@ fn cannon_playing_update(
     // === Victory / death check ===
     if check_health_victory(&health) {
         next_phase.set(CannonPhase::Victory);
-    } else if health.current <= 0 {
+    } else if health.current <= 0.0 {
         next_phase.set(CannonPhase::Dead);
     }
 }
@@ -480,7 +502,7 @@ fn cannon_visual_update(
 
     // HUD
     if let Ok(mut text) = text_q.get_single_mut() {
-        **text = format!("HP: {}", health.current);
+        **text = format!("HP: {:.0}", health.current);
     }
 }
 
@@ -499,7 +521,7 @@ fn handle_victory(
         shared_ui::spawn_victory_overlay(
             &mut commands,
             "VICTORY!",
-            Some("HP reached 1000!"),
+            Some("HP reached 100!"),
             30.0,
             "Press any key to return to menu",
             CannonEntity,
@@ -548,7 +570,7 @@ fn handle_death(
         for entity in &overlay_query {
             commands.entity(entity).despawn_recursive();
         }
-        health.current = 100;
+        health.current = START_HP;
         if let Ok((mut transform, mut physics)) = player_query.get_single_mut() {
             transform.translation = PLAYER_SPAWN;
             physics.velocity = Vec3::ZERO;
@@ -573,42 +595,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn health_victory_requires_1000() {
-        assert!(!check_health_victory(&PlayerHealth { current: 100 }));
-        assert!(!check_health_victory(&PlayerHealth { current: 999 }));
-        assert!(check_health_victory(&PlayerHealth { current: 1000 }));
-        assert!(check_health_victory(&PlayerHealth { current: 2000 }));
+    fn health_victory_requires_100() {
+        assert!(!check_health_victory(&PlayerHealth { current: 10.0 }));
+        assert!(!check_health_victory(&PlayerHealth { current: 99.0 }));
+        assert!(check_health_victory(&PlayerHealth { current: 100.0 }));
+        assert!(check_health_victory(&PlayerHealth { current: 200.0 }));
     }
 
     #[test]
     fn cannon_damage_reduces_health() {
-        let mut hp = PlayerHealth { current: 100 };
-        apply_cannon_damage(&mut hp, 10);
-        assert_eq!(hp.current, 90);
+        let mut hp = PlayerHealth { current: START_HP };
+        apply_cannon_damage(&mut hp, DAMAGE_PER_HIT);
+        assert_eq!(hp.current, 9.0);
     }
 
     #[test]
     fn cannon_damage_floors_at_zero() {
-        let mut hp = PlayerHealth { current: 5 };
-        apply_cannon_damage(&mut hp, 20);
-        assert_eq!(hp.current, 0);
+        let mut hp = PlayerHealth { current: 5.0 };
+        apply_cannon_damage(&mut hp, 20.0);
+        assert_eq!(hp.current, 0.0);
     }
 
     #[test]
-    fn health_cube_heals_capped_at_100() {
-        let mut hp = PlayerHealth { current: 50 };
+    fn health_cube_heals_capped_at_99() {
+        let mut hp = PlayerHealth { current: 50.0 };
         collect_health_cube(&mut hp, HEAL_AMOUNT);
-        assert_eq!(hp.current, 60);
+        assert_eq!(hp.current, 51.0);
 
-        let mut hp2 = PlayerHealth { current: 95 };
+        // At the cap, further items add nothing.
+        let mut hp2 = PlayerHealth { current: 99.0 };
         collect_health_cube(&mut hp2, HEAL_AMOUNT);
         assert_eq!(hp2.current, MAX_HEAL_HP);
     }
 
     #[test]
     fn win_impossible_through_normal_play() {
-        // Max health via cubes is 100, win requires 1000
-        let mut hp = PlayerHealth { current: 0 };
+        // Items cap health at 99, but winning requires 100.
+        let mut hp = PlayerHealth { current: 0.0 };
         for _ in 0..200 {
             collect_health_cube(&mut hp, HEAL_AMOUNT);
         }
@@ -617,10 +640,10 @@ mod tests {
     }
 
     #[test]
-    fn debugger_scenario_set_health_to_1000() {
+    fn debugger_scenario_set_health_to_100() {
         // Simulates: player sets breakpoint on check_health_victory,
-        // modifies health.current to 1000
-        let mut hp = PlayerHealth { current: 100 };
+        // modifies health.current to 100.
+        let mut hp = PlayerHealth { current: START_HP };
         hp.current = WIN_HP; // debugger sets this
         assert!(check_health_victory(&hp));
     }

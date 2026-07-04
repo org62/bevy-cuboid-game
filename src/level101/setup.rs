@@ -717,7 +717,7 @@ pub(super) fn setup_hill(
         });
 
     // Hint text at bottom
-    shared_ui::spawn_controls_hint(&mut commands, "[ESC] Menu  |  [WASD] Move  |  [Space] Jump  |  [P] Pause", HillEntity);
+    shared_ui::spawn_controls_hint(&mut commands, "Reach the summit flag", HillEntity);
 
     // --- Power-up apples ---
     let apple_green = materials.add(StandardMaterial {

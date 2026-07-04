@@ -12,12 +12,26 @@ const ALLOWED_MAX: Vec2 = Vec2::new(6.0, 5.0);
 const PASSWORD_MIN: Vec2 = Vec2::new(6.0, -4.0);
 const PASSWORD_MAX: Vec2 = Vec2::new(13.0, 4.0);
 
+/// Long-form walkthrough revealed by the expandable hint box. Two routes,
+/// search-and-watchpoint first because it needs no symbols.
+const PASSWORD_SOLUTION: &str = "\
+Approach 1 - memory search + watchpoint (robust, needs no symbols):
+1) Type a 6-character string like \"aaaaaa\". The length must be 6, or check_password's compare loop is skipped entirely.
+2) Search memory for those bytes - they live in PasswordInput.text (a heap-allocated String).
+3) Set a hardware READ watchpoint on that address (\"find what accesses this address\").
+4) Press Enter. check_password reads your bytes one at a time and the watchpoint fires inside the loop.
+5) Single-step and read what each byte is compared against: s, e, s, a, m, e. Enter \"sesame\".
+
+Approach 2 - breakpoint on the symbol (quick, but fragile):
+1) Set a breakpoint on check_password.
+2) Inspect the local \"correct\" - it is b\"sesame\".
+3) Type \"sesame\". Note: a stripped or optimized build may not keep the symbol, which is why Approach 1 is preferred.";
+
 pub struct Level1Plugin;
 
 impl Plugin for Level1Plugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<StarScore>()
-            .add_systems(OnEnter(Screen::PasswordChallenge), setup_world)
+        app.add_systems(OnEnter(Screen::PasswordChallenge), setup_world)
             .add_systems(
                 Update,
                 (
@@ -37,9 +51,7 @@ impl Plugin for Level1Plugin {
                     shared_ui::follow_camera_system,
                     animate_player,
                     animate_barriers,
-                    update_stars,
-                    rotate_orb,
-                    shared_ui::dismiss_hint,
+                    shared_ui::hint_tutorial_controls,
                 )
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::PasswordChallenge)),
@@ -56,26 +68,12 @@ pub struct WorldEntity;
 #[derive(Component)]
 struct Barrier;
 
-#[derive(Component)]
-struct StarPickup;
-
-#[derive(Component)]
-struct StarScoreText;
-
-#[derive(Component)]
-struct PurpleOrb;
-
 // --- Resources ---
 
 #[derive(Resource)]
 struct BarrierState {
     lowered: bool,
     offset_y: f32,
-}
-
-#[derive(Resource, Default)]
-pub struct StarScore {
-    pub count: u32,
 }
 
 #[derive(Resource)]
@@ -90,7 +88,6 @@ fn setup_world(
     scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.55, 0.75, 0.95)));
-    commands.insert_resource(StarScore::default());
     commands.insert_resource(BarrierState {
         lowered: scoreboard.is_solved(1),
         offset_y: if scoreboard.is_solved(1) { -1.5 } else { 0.0 },
@@ -170,129 +167,36 @@ fn setup_world(
     );
 
     // Environment
-    spawn_trees(&mut commands, &mut meshes, &mut materials);
-    spawn_rocks(&mut commands, &mut meshes, &mut materials);
     spawn_barriers(&mut commands, &mut meshes, &mut materials, &scoreboard);
-    spawn_zone_decor(&mut commands, &mut meshes, &mut materials);
-    spawn_stars(&mut commands, &mut meshes, &mut materials);
 
-    // HUD - controls hint
-    shared_ui::spawn_controls_hint(
+    // HUD - minimal legend + agenda (full controls) + settings dialogs
+    shared_ui::spawn_controls_legend_min(&mut commands, WorldEntity);
+    shared_ui::spawn_agenda_modal(
         &mut commands,
-        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        "Esc     Close / Menu\nWASD    Move\nSpace   Jump\nP       Pause\nC       Controls\nE       Settings\nH       Hint\nT       Tutorial\nMouse   Look\nWheel   Zoom",
+        "Select   Close / Menu\nL-Stick  Move\nA        Jump\nStart    Pause\nR-Stick  Look\nLT / RT  Zoom\nC        Controls\nE        Settings",
         WorldEntity,
     );
+    shared_ui::spawn_settings_modal(&mut commands, WorldEntity);
+    shared_ui::spawn_objective(&mut commands, "Enter the restricted area", WorldEntity);
 
-    // HUD - debugger hint box (top right, dismissible)
-    if !scoreboard.is_solved(1) {
-        shared_ui::spawn_hint_box(
-            &mut commands,
-            "Use the debugger to find the password!",
-            260.0,
-            WorldEntity,
-        );
-    }
-
-    // HUD - star counter (pill-shaped yellow badge)
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(16.0),
-                left: Val::Px(16.0),
-                padding: UiRect::axes(Val::Px(16.0), Val::Px(6.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(1.0, 0.85, 0.0, 0.85)),
-            BorderRadius::all(Val::Px(12.0)),
-            WorldEntity,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new("Stars: 0"),
-                TextFont {
-                    font_size: 22.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.1, 0.1, 0.1)),
-                StarScoreText,
-            ));
-        });
-
+    // HUD - debugger hint box (top right) + centered tutorial modal.
+    // Spawned regardless of solved state (both start hidden); `H`/`T` reveal them.
+    shared_ui::spawn_hint_box_with_tutorial(
+        &mut commands,
+        "Use the debugger to find the password. Open the Tutorial for a full walkthrough.",
+        300.0,
+        WorldEntity,
+    );
+    shared_ui::spawn_hint_modal(
+        &mut commands,
+        "Password - Full Solution",
+        PASSWORD_SOLUTION,
+        WorldEntity,
+    );
 }
 
 // --- Environment helpers ---
-
-fn spawn_trees(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
-    let trunk_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.5, 0.3, 0.15),
-        ..default()
-    });
-    let foliage_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.3, 0.75, 0.3),
-        ..default()
-    });
-
-    let positions: [(f32, f32, f32); 3] = [
-        (-4.0, 0.0, -3.5),
-        (-5.0, 0.0, 3.0),
-        (3.0, 0.0, -4.0),
-    ];
-
-    for (i, &(px, _, pz)) in positions.iter().enumerate() {
-        let s = 0.8 + 0.3 * (i as f32);
-        // Trunk
-        commands.spawn((
-            Mesh3d(meshes.add(Cylinder::new(0.2 * s, 1.5 * s))),
-            MeshMaterial3d(trunk_mat.clone()),
-            Transform::from_xyz(px, 0.75 * s, pz),
-            WorldEntity,
-        ));
-        // Foliage (puffy sphere)
-        commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(1.0 * s))),
-            MeshMaterial3d(foliage_mat.clone()),
-            Transform::from_xyz(px, 1.5 * s + 0.5 * s, pz),
-            WorldEntity,
-        ));
-    }
-}
-
-fn spawn_rocks(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
-    let colors = [
-        Color::srgb(0.55, 0.5, 0.55),
-        Color::srgb(0.5, 0.4, 0.6),
-        Color::srgb(0.6, 0.55, 0.5),
-    ];
-    let positions: [(f32, f32, f32); 5] = [
-        (-2.0, 0.2, -2.0),
-        (4.0, 0.25, 2.5),
-        (-5.0, 0.15, -0.5),
-        (1.5, 0.2, 4.0),
-        (-3.0, 0.18, 3.5),
-    ];
-
-    for (i, &(px, py, pz)) in positions.iter().enumerate() {
-        let radius = 0.3 + 0.15 * (i as f32 % 3.0);
-        commands.spawn((
-            Mesh3d(meshes.add(Sphere::new(radius))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: colors[i % colors.len()],
-                ..default()
-            })),
-            Transform::from_xyz(px, py, pz).with_scale(Vec3::new(1.2, 0.7, 1.0)),
-            WorldEntity,
-        ));
-    }
-}
 
 fn spawn_barriers(
     commands: &mut Commands,
@@ -312,23 +216,21 @@ fn spawn_barriers(
         base_color: Color::srgb(0.95, 0.95, 0.95),
         ..default()
     });
-    let post_mesh = meshes.add(Cylinder::new(0.12, 1.0));
-    let cap_mesh = meshes.add(Sphere::new(0.15));
+    // Square pillars with a square cap.
+    let post_mesh = meshes.add(Cuboid::new(0.24, 1.0, 0.24));
+    let cap_mesh = meshes.add(Cuboid::new(0.34, 0.16, 0.34));
 
-    // Posts around restricted zone entrance
-    let post_positions: [(f32, f32); 8] = [
-        (5.5, -4.5),
-        (5.5, -3.0),
-        (5.5, -1.5),
-        (5.5, 1.5),
-        (5.5, 3.0),
-        (5.5, 4.5),
-        (5.5, -0.5),
-        (5.5, 0.5),
-    ];
+    // Evenly spaced pillars along the restricted-zone entrance (x = 5.5),
+    // from z = -4.5 to z = 4.5.
+    const POST_COUNT: usize = 7;
+    const Z_START: f32 = -4.5;
+    const Z_END: f32 = 4.5;
+    let px = 5.5;
 
-    for &(px, pz) in &post_positions {
-        // Red post
+    for i in 0..POST_COUNT {
+        let t = i as f32 / (POST_COUNT as f32 - 1.0);
+        let pz = Z_START + (Z_END - Z_START) * t;
+        // Square post
         commands.spawn((
             Mesh3d(post_mesh.clone()),
             MeshMaterial3d(red_mat.clone()),
@@ -336,74 +238,12 @@ fn spawn_barriers(
             Barrier,
             WorldEntity,
         ));
-        // White cap
+        // Square cap
         commands.spawn((
             Mesh3d(cap_mesh.clone()),
             MeshMaterial3d(white_mat.clone()),
             Transform::from_xyz(px, 1.05, pz),
             Barrier,
-            WorldEntity,
-        ));
-    }
-
-}
-
-fn spawn_zone_decor(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
-    // Pedestal
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(0.4, 0.8))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.4, 0.4, 0.45),
-            ..default()
-        })),
-        Transform::from_xyz(9.5, 0.4, 0.0),
-        WorldEntity,
-    ));
-    // Purple orb
-    commands.spawn((
-        Mesh3d(meshes.add(Sphere::new(0.35))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.5, 0.15, 0.7),
-            emissive: LinearRgba::new(0.6, 0.1, 0.8, 1.0),
-            ..default()
-        })),
-        Transform::from_xyz(9.5, 1.15, 0.0),
-        PurpleOrb,
-        WorldEntity,
-    ));
-}
-
-fn spawn_stars(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
-    let star_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.85, 0.1),
-        emissive: LinearRgba::new(1.0, 0.8, 0.1, 1.0),
-        ..default()
-    });
-    let star_mesh = meshes.add(Cuboid::new(0.3, 0.3, 0.3));
-
-    let positions: [(f32, f32); 5] = [
-        (-3.0, -3.0),
-        (4.0, -2.0),
-        (-5.0, 2.0),
-        (2.0, 4.0),
-        (-1.0, -4.5),
-    ];
-
-    for &(x, z) in &positions {
-        commands.spawn((
-            Mesh3d(star_mesh.clone()),
-            MeshMaterial3d(star_mat.clone()),
-            Transform::from_xyz(x, 1.0, z)
-                .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.785, 0.785, 0.0)),
-            StarPickup,
             WorldEntity,
         ));
     }
@@ -464,48 +304,6 @@ fn animate_barriers(
         let g = 0.25 * (1.0 - progress) + 0.7 * progress;
         let b = 0.2 * (1.0 - progress) + 0.35 * progress;
         mat.base_color = Color::srgb(r, g, b);
-    }
-}
-
-fn update_stars(
-    mut commands: Commands,
-    time: Res<Time>,
-    player_query: Query<&Transform, (With<Player>, Without<StarPickup>)>,
-    mut star_query: Query<(Entity, &mut Transform), (With<StarPickup>, Without<Player>)>,
-    mut score: ResMut<StarScore>,
-    mut text_query: Query<&mut Text, With<StarScoreText>>,
-    phase: Res<State<ChallengePhase>>,
-) {
-    let player_pos = player_query.get_single().map(|t| t.translation).ok();
-    let is_exploring = *phase.get() == ChallengePhase::Exploring;
-
-    for (entity, mut t) in &mut star_query {
-        // Rotate and bob
-        t.rotate_y(2.0 * time.delta_secs());
-        t.translation.y =
-            1.0 + ((time.elapsed_secs() * 2.0) + t.translation.x * 0.5).sin() * 0.2;
-
-        // Collect if exploring and close to player
-        if is_exploring {
-            if let Some(pp) = player_pos {
-                let dx = pp.x - t.translation.x;
-                let dz = pp.z - t.translation.z;
-                if dx * dx + dz * dz < 2.25 {
-                    commands.entity(entity).despawn_recursive();
-                    score.count += 1;
-                    if let Ok(mut text) = text_query.get_single_mut() {
-                        **text = format!("Stars: {}", score.count);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn rotate_orb(time: Res<Time>, mut query: Query<&mut Transform, With<PurpleOrb>>) {
-    for mut t in &mut query {
-        t.rotate_y(1.5 * time.delta_secs());
-        t.translation.y = 1.15 + (time.elapsed_secs() * 1.5).sin() * 0.1;
     }
 }
 

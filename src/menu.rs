@@ -7,10 +7,17 @@ pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::Menu), setup_menu)
+        app.init_resource::<SecretsRevealed>()
+            .add_systems(OnEnter(Screen::Menu), setup_menu)
             .add_systems(
                 Update,
-                (menu_keyboard, menu_button_click, menu_button_hover, menu_gamepad)
+                (
+                    menu_keyboard,
+                    menu_button_click,
+                    menu_button_hover,
+                    menu_gamepad,
+                    update_menu_visibility,
+                )
                     .run_if(in_state(Screen::Menu)),
             )
             .add_systems(OnExit(Screen::Menu), cleanup_menu);
@@ -23,8 +30,18 @@ struct MenuScreen;
 #[derive(Component)]
 struct ScoreboardText;
 
+/// The internal level id (1-5, 13-15) the button launches.
 #[derive(Component)]
 struct ChallengeButton(u32);
+
+/// Marks a hidden easter-egg level button (levels 13-15, shown as 101-103).
+#[derive(Component)]
+struct HiddenButton;
+
+/// Whether the hidden easter-egg levels have been revealed (via the `?` key).
+/// Persists for the session.
+#[derive(Resource, Default)]
+struct SecretsRevealed(bool);
 
 #[derive(Resource)]
 struct MenuSelection(Option<usize>);
@@ -33,22 +50,20 @@ struct MenuSelection(Option<usize>);
 #[derive(Resource)]
 struct MenuNavCooldown(f32);
 
-const LEVEL_NAMES: [&str; 15] = [
-    "The Password Gate",
-    "The Cannon Gauntlet",
-    "The Countdown",
-    "The Invisible Maze",
-    "The Rigged Race",
-    "The Locked Chest",
-    "Gravity Flip",
-    "The Phantom Toll",
-    "Friendly Fire",
-    "The Loot Goblin",
-    "The Doppelganger",
-    "The Final Exam",
-    "The Hill Fortress",
-    "The Rolling Meadow",
-    "The Indoor Waterpark",
+/// Regular levels: (internal id, name).
+const REGULAR_LEVELS: [(u32, &str); 5] = [
+    (1, "The Password Gate"),
+    (2, "The Cannon Gauntlet"),
+    (3, "The Countdown"),
+    (4, "The Invisible Maze"),
+    (5, "The Rigged Race"),
+];
+
+/// Hidden easter-egg levels: (internal id = display number, name).
+const HIDDEN_LEVELS: [(u32, &str); 3] = [
+    (101, "The Hill Fortress"),
+    (102, "The Rolling Meadow"),
+    (103, "The Indoor Waterpark"),
 ];
 
 fn screen_for_level(level: u32) -> Option<Screen> {
@@ -58,24 +73,56 @@ fn screen_for_level(level: u32) -> Option<Screen> {
         3 => Some(Screen::CountdownChallenge),
         4 => Some(Screen::MazeChallenge),
         5 => Some(Screen::RaceChallenge),
-        6 => Some(Screen::ChestChallenge),
-        7 => Some(Screen::GravityChallenge),
-        8 => Some(Screen::TollChallenge),
-        9 => Some(Screen::ArenaChallenge),
-        10 => Some(Screen::LootChallenge),
-        11 => Some(Screen::CloneChallenge),
-        12 => Some(Screen::FinalChallenge),
-        13 => Some(Screen::HillChallenge),
-        14 => Some(Screen::MeadowChallenge),
-        15 => Some(Screen::WaterparkChallenge),
+        101 => Some(Screen::HillChallenge),
+        102 => Some(Screen::MeadowChallenge),
+        103 => Some(Screen::WaterparkChallenge),
         _ => None,
     }
 }
 
-fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
+/// Ordered list of the level ids the player can currently pick.
+fn visible_levels(revealed: bool) -> Vec<u32> {
+    let mut v: Vec<u32> = REGULAR_LEVELS.iter().map(|(l, _)| *l).collect();
+    if revealed {
+        v.extend(HIDDEN_LEVELS.iter().map(|(l, _)| *l));
+    }
+    v
+}
+
+fn solved_and_total(scoreboard: &Scoreboard, revealed: bool) -> (u32, u32) {
+    let regular = REGULAR_LEVELS
+        .iter()
+        .filter(|(l, _)| scoreboard.is_solved(*l))
+        .count() as u32;
+    if revealed {
+        let hidden = HIDDEN_LEVELS
+            .iter()
+            .filter(|(l, _)| scoreboard.is_solved(*l))
+            .count() as u32;
+        (regular + hidden, 8)
+    } else {
+        (regular, 5)
+    }
+}
+
+fn button_colors(solved: bool) -> (Color, Color) {
+    if solved {
+        (Color::srgb(0.15, 0.3, 0.15), Color::srgb(0.5, 1.0, 0.5))
+    } else {
+        (Color::srgb(0.2, 0.2, 0.3), Color::srgb(0.9, 0.9, 0.9))
+    }
+}
+
+fn setup_menu(
+    mut commands: Commands,
+    scoreboard: Res<Scoreboard>,
+    revealed: Res<SecretsRevealed>,
+) {
     commands.insert_resource(MenuSelection(None));
     commands.insert_resource(MenuNavCooldown(0.0));
     commands.spawn((Camera2d, MenuScreen));
+
+    let (solved, total) = solved_and_total(&scoreboard, revealed.0);
 
     commands
         .spawn((
@@ -95,34 +142,18 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
             // Title
             parent.spawn((
                 Text::new("DEBUGGER CHALLENGES"),
-                TextFont {
-                    font_size: 42.0,
-                    ..default()
-                },
+                TextFont { font_size: 42.0, ..default() },
                 TextColor(Color::srgb(0.9, 0.9, 0.1)),
-                Node {
-                    margin: UiRect::bottom(Val::Px(8.0)),
-                    ..default()
-                },
+                Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() },
             ));
 
             // Scoreboard
             parent.spawn((
-                Text::new(format!(
-                    "Solved: {} / {}",
-                    scoreboard.total_solved(),
-                    scoreboard.total_challenges()
-                )),
-                TextFont {
-                    font_size: 22.0,
-                    ..default()
-                },
+                Text::new(format!("Solved: {} / {}", solved, total)),
+                TextFont { font_size: 22.0, ..default() },
                 TextColor(Color::srgb(0.6, 0.9, 0.6)),
                 ScoreboardText,
-                Node {
-                    margin: UiRect::bottom(Val::Px(12.0)),
-                    ..default()
-                },
+                Node { margin: UiRect::bottom(Val::Px(12.0)), ..default() },
             ));
 
             // Level buttons grid (2 columns)
@@ -137,99 +168,98 @@ fn setup_menu(mut commands: Commands, scoreboard: Res<Scoreboard>) {
                     ..default()
                 })
                 .with_children(|grid| {
-                    for (i, name) in LEVEL_NAMES.iter().enumerate() {
-                        let level = (i + 1) as u32;
-                        let solved = scoreboard.is_solved(level);
-                        let label = if solved {
-                            format!("#{} {}", level, name)
-                        } else {
-                            format!("#{} {}", level, name)
-                        };
-                        let bg_color = if solved {
-                            Color::srgb(0.15, 0.3, 0.15)
-                        } else {
-                            Color::srgb(0.2, 0.2, 0.3)
-                        };
-                        let text_color = if solved {
-                            Color::srgb(0.5, 1.0, 0.5)
-                        } else {
-                            Color::srgb(0.9, 0.9, 0.9)
-                        };
-
-                        grid.spawn((
-                            Button,
-                            Node {
-                                width: Val::Px(330.0),
-                                padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
-                                justify_content: JustifyContent::Center,
-                                ..default()
-                            },
-                            BackgroundColor(bg_color),
-                            BorderRadius::all(Val::Px(6.0)),
-                            ChallengeButton(level),
-                        ))
-                        .with_children(|btn| {
-                            btn.spawn((
-                                Text::new(label),
-                                TextFont {
-                                    font_size: 18.0,
-                                    ..default()
-                                },
-                                TextColor(text_color),
-                            ));
-                        });
+                    for (level, name) in REGULAR_LEVELS.iter() {
+                        spawn_level_button(grid, *level, *level, name, scoreboard.is_solved(*level), false, true);
+                    }
+                    for (level, name) in HIDDEN_LEVELS.iter() {
+                        spawn_level_button(
+                            grid,
+                            *level,
+                            *level,
+                            name,
+                            scoreboard.is_solved(*level),
+                            true,
+                            revealed.0,
+                        );
                     }
                 });
 
             // Hint
             parent.spawn((
-                Text::new("Press 1-9, 0, -, =, \\, ], [ or click to start  |  D-pad + A on gamepad"),
-                TextFont {
-                    font_size: 16.0,
-                    ..default()
-                },
+                Text::new("Press 1-5 or click to start  |  D-pad + A on gamepad"),
+                TextFont { font_size: 16.0, ..default() },
                 TextColor(Color::srgb(0.5, 0.5, 0.5)),
-                Node {
-                    margin: UiRect::top(Val::Px(12.0)),
-                    ..default()
-                },
+                Node { margin: UiRect::top(Val::Px(12.0)), ..default() },
             ));
         });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_level_button(
+    grid: &mut ChildBuilder,
+    level: u32,
+    display_num: u32,
+    name: &str,
+    solved: bool,
+    hidden: bool,
+    visible: bool,
+) {
+    let (bg_color, text_color) = button_colors(solved);
+    let mut node = Node {
+        width: Val::Px(330.0),
+        padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+        justify_content: JustifyContent::Center,
+        ..default()
+    };
+    if hidden && !visible {
+        node.display = Display::None;
+    }
+
+    let mut btn = grid.spawn((
+        Button,
+        node,
+        BackgroundColor(bg_color),
+        BorderRadius::all(Val::Px(6.0)),
+        ChallengeButton(level),
+    ));
+    if hidden {
+        btn.insert(HiddenButton);
+    }
+    btn.with_children(|b| {
+        b.spawn((
+            Text::new(format!("#{} {}", display_num, name)),
+            TextFont { font_size: 18.0, ..default() },
+            TextColor(text_color),
+        ));
+    });
 }
 
 fn menu_keyboard(
     mut events: EventReader<KeyboardInput>,
     mut next_state: ResMut<NextState<Screen>>,
+    mut revealed: ResMut<SecretsRevealed>,
 ) {
     for event in events.read() {
         if !event.state.is_pressed() {
             continue;
         }
         if let Key::Character(c) = &event.logical_key {
-            let level = match c.as_str() {
-                "1" => Some(1u32),
-                "2" => Some(2),
-                "3" => Some(3),
-                "4" => Some(4),
-                "5" => Some(5),
-                "6" => Some(6),
-                "7" => Some(7),
-                "8" => Some(8),
-                "9" => Some(9),
-                "0" => Some(10),
-                "-" => Some(11),
-                "=" => Some(12),
-                "\\" => Some(13),
-                "]" => Some(14),
-                "[" => Some(15),
-                _ => None,
-            };
-            if let Some(l) = level {
-                if let Some(screen) = screen_for_level(l) {
-                    next_state.set(screen);
-                }
+            match c.as_str() {
+                "1" => start(&mut next_state, 1),
+                "2" => start(&mut next_state, 2),
+                "3" => start(&mut next_state, 3),
+                "4" => start(&mut next_state, 4),
+                "5" => start(&mut next_state, 5),
+                "?" => revealed.0 = true, // easter egg: reveal hidden levels
+                _ => {}
             }
         }
+    }
+}
+
+fn start(next_state: &mut ResMut<NextState<Screen>>, level: u32) {
+    if let Some(screen) = screen_for_level(level) {
+        next_state.set(screen);
     }
 }
 
@@ -251,26 +281,47 @@ fn menu_button_hover(
         (&Interaction, &mut BackgroundColor, &ChallengeButton),
         (Changed<Interaction>, With<ChallengeButton>),
     >,
-    selection: Option<Res<MenuSelection>>,
+    scoreboard: Res<Scoreboard>,
 ) {
-    let sel = selection.and_then(|s| s.0);
     for (inter, mut bg, btn) in &mut interaction {
-        let is_selected = sel == Some(btn.0 as usize - 1);
+        let solved = scoreboard.is_solved(btn.0);
+        let (base, _) = button_colors(solved);
         *bg = match *inter {
             Interaction::Hovered => BackgroundColor(Color::srgb(0.3, 0.3, 0.5)),
             Interaction::Pressed => BackgroundColor(Color::srgb(0.4, 0.4, 0.6)),
-            Interaction::None if is_selected => BackgroundColor(Color::srgb(0.3, 0.3, 0.5)),
-            Interaction::None => BackgroundColor(Color::srgb(0.2, 0.2, 0.3)),
+            Interaction::None => BackgroundColor(base),
         };
     }
 }
 
-const NUM_LEVELS: usize = 15;
-const MENU_COLS: usize = 2;
+/// Keeps the hidden buttons and the scoreboard total in sync with the reveal
+/// state, so pressing `?` immediately shows the easter-egg levels.
+fn update_menu_visibility(
+    revealed: Res<SecretsRevealed>,
+    scoreboard: Res<Scoreboard>,
+    mut hidden_q: Query<&mut Node, With<HiddenButton>>,
+    mut score_q: Query<&mut Text, With<ScoreboardText>>,
+) {
+    let show = revealed.0;
+    for mut node in &mut hidden_q {
+        let want = if show { Display::Flex } else { Display::None };
+        if node.display != want {
+            node.display = want;
+        }
+    }
+    let (solved, total) = solved_and_total(&scoreboard, show);
+    if let Ok(mut text) = score_q.get_single_mut() {
+        let s = format!("Solved: {} / {}", solved, total);
+        if **text != s {
+            **text = s;
+        }
+    }
+}
 
 fn menu_gamepad(
     gamepads: Query<&Gamepad>,
     time: Res<Time>,
+    revealed: Res<SecretsRevealed>,
     mut selection: ResMut<MenuSelection>,
     mut cooldown: ResMut<MenuNavCooldown>,
     mut next_state: ResMut<NextState<Screen>>,
@@ -279,78 +330,57 @@ fn menu_gamepad(
 ) {
     cooldown.0 = (cooldown.0 - time.delta_secs()).max(0.0);
 
-    let mut dx: i32 = 0;
-    let mut dy: i32 = 0;
+    let visible = visible_levels(revealed.0);
+    if visible.is_empty() {
+        return;
+    }
+
+    let mut delta: i32 = 0;
     let mut confirm = false;
 
     for gamepad in &gamepads {
-        // D-pad (digital, use just_pressed for crisp nav)
-        if gamepad.just_pressed(GamepadButton::DPadUp) {
-            dy -= 1;
+        if gamepad.just_pressed(GamepadButton::DPadUp) || gamepad.just_pressed(GamepadButton::DPadLeft) {
+            delta -= 1;
         }
-        if gamepad.just_pressed(GamepadButton::DPadDown) {
-            dy += 1;
+        if gamepad.just_pressed(GamepadButton::DPadDown) || gamepad.just_pressed(GamepadButton::DPadRight) {
+            delta += 1;
         }
-        if gamepad.just_pressed(GamepadButton::DPadLeft) {
-            dx -= 1;
-        }
-        if gamepad.just_pressed(GamepadButton::DPadRight) {
-            dx += 1;
-        }
-
-        // Left stick (with cooldown)
         if cooldown.0 <= 0.0 {
             let stick = gamepad.left_stick();
             if stick.y > 0.5 {
-                dy -= 1;
+                delta -= 1;
             } else if stick.y < -0.5 {
-                dy += 1;
-            }
-            if stick.x > 0.5 {
-                dx += 1;
-            } else if stick.x < -0.5 {
-                dx -= 1;
+                delta += 1;
             }
         }
-
         if gamepad.just_pressed(GamepadButton::South) {
             confirm = true;
         }
     }
 
-    if dx != 0 || dy != 0 {
+    if delta != 0 {
         cooldown.0 = 0.18;
-        let cur = selection.0.unwrap_or(0);
-        let col = cur % MENU_COLS;
-        let row = cur / MENU_COLS;
-
-        let new_col = (col as i32 + dx).clamp(0, (MENU_COLS - 1) as i32) as usize;
-        let new_row = (row as i32 + dy).clamp(0, ((NUM_LEVELS - 1) / MENU_COLS) as i32) as usize;
-        let mut new_idx = new_row * MENU_COLS + new_col;
-        if new_idx >= NUM_LEVELS {
-            new_idx = NUM_LEVELS - 1;
-        }
+        let cur = selection.0.unwrap_or(0) as i32;
+        let new_idx = (cur + delta).clamp(0, visible.len() as i32 - 1) as usize;
         selection.0 = Some(new_idx);
 
-        // Update button colors
+        let selected_level = visible.get(new_idx).copied();
         for (btn, mut bg) in &mut buttons {
-            let idx = btn.0 as usize - 1;
-            let solved = scoreboard.is_solved(btn.0);
-            if idx == new_idx {
+            if Some(btn.0) == selected_level {
                 *bg = BackgroundColor(Color::srgb(0.3, 0.3, 0.5));
-            } else if solved {
-                *bg = BackgroundColor(Color::srgb(0.15, 0.3, 0.15));
             } else {
-                *bg = BackgroundColor(Color::srgb(0.2, 0.2, 0.3));
+                let (base, _) = button_colors(scoreboard.is_solved(btn.0));
+                *bg = BackgroundColor(base);
             }
         }
     }
 
     if confirm {
         if let Some(idx) = selection.0 {
-            let level = idx as u32 + 1;
-            if let Some(screen) = screen_for_level(level) {
-                next_state.set(screen);
+            if let Some(&level) = visible.get(idx) {
+                if let Some(screen) = screen_for_level(level) {
+                    next_state.set(screen);
+                }
             }
         }
     }

@@ -3,16 +3,9 @@ mod level2;
 mod level3;
 mod level4;
 mod level5;
-mod level6;
-mod level7;
-mod level8;
-mod level9;
-mod level10;
-mod level11;
-mod level12;
-mod level13;
-mod level14;
-mod level15;
+mod level101;
+mod level102;
+mod level103;
 mod menu;
 mod password;
 mod player;
@@ -35,13 +28,6 @@ pub enum Screen {
     CountdownChallenge,
     MazeChallenge,
     RaceChallenge,
-    ChestChallenge,
-    GravityChallenge,
-    TollChallenge,
-    ArenaChallenge,
-    LootChallenge,
-    CloneChallenge,
-    FinalChallenge,
     HillChallenge,
     MeadowChallenge,
     WaterparkChallenge,
@@ -103,77 +89,6 @@ pub enum RacePhase {
     Lost,
 }
 
-// --- Chest phases (Level 6) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::ChestChallenge)]
-pub enum ChestPhase {
-    #[default]
-    Playing,
-    Victory,
-}
-
-// --- Gravity phases (Level 7) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::GravityChallenge)]
-pub enum GravityPhase {
-    #[default]
-    Playing,
-    Victory,
-}
-
-// --- Toll phases (Level 8) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::TollChallenge)]
-pub enum TollPhase {
-    #[default]
-    Playing,
-    Victory,
-}
-
-// --- Arena phases (Level 9) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::ArenaChallenge)]
-pub enum ArenaPhase {
-    #[default]
-    Playing,
-    Victory,
-    Lost,
-}
-
-// --- Loot phases (Level 10) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::LootChallenge)]
-pub enum LootPhase {
-    #[default]
-    Playing,
-    Victory,
-}
-
-// --- Clone phases (Level 11) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::CloneChallenge)]
-pub enum ClonePhase {
-    #[default]
-    Playing,
-    Victory,
-}
-
-// --- Final phases (Level 12) ---
-
-#[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
-#[source(Screen = Screen::FinalChallenge)]
-pub enum FinalPhase {
-    #[default]
-    Playing,
-    Victory,
-}
-
 // --- Hill phases (Level 13) ---
 
 #[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
@@ -211,37 +126,27 @@ pub struct GamePaused(pub bool);
 
 // --- Scoreboard ---
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct Scoreboard {
-    solved: [bool; 15],
-}
-
-impl Default for Scoreboard {
-    fn default() -> Self {
-        Self { solved: [false; 15] }
-    }
+    solved: std::collections::HashSet<u32>,
 }
 
 impl Scoreboard {
     pub fn total_solved(&self) -> u32 {
-        self.solved.iter().filter(|&&s| s).count() as u32
+        self.solved.len() as u32
     }
 
     pub fn total_challenges(&self) -> u32 {
-        15
+        // 5 regular levels + 3 hidden easter-egg levels.
+        8
     }
 
     pub fn is_solved(&self, level: u32) -> bool {
-        level.checked_sub(1)
-            .and_then(|i| self.solved.get(i as usize))
-            .copied()
-            .unwrap_or(false)
+        self.solved.contains(&level)
     }
 
     pub fn set_solved(&mut self, level: u32) {
-        if let Some(slot) = level.checked_sub(1).and_then(|i| self.solved.get_mut(i as usize)) {
-            *slot = true;
-        }
+        self.solved.insert(level);
     }
 }
 
@@ -253,7 +158,7 @@ mod tests {
     fn scoreboard_starts_empty() {
         let sb = Scoreboard::default();
         assert_eq!(sb.total_solved(), 0);
-        assert_eq!(sb.total_challenges(), 15);
+        assert_eq!(sb.total_challenges(), 8);
     }
 
     #[test]
@@ -268,10 +173,10 @@ mod tests {
     #[test]
     fn scoreboard_all_solved() {
         let mut sb = Scoreboard::default();
-        for level in 1..=15 {
+        for level in [1, 2, 3, 4, 5, 101, 102, 103] {
             sb.set_solved(level);
         }
-        assert_eq!(sb.total_solved(), 15);
+        assert_eq!(sb.total_solved(), 8);
         assert_eq!(sb.total_solved(), sb.total_challenges());
     }
 
@@ -286,8 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn all_15_levels_have_screens() {
-        // Verify Screen enum has all variants
+    fn active_levels_have_screens() {
         let screens = [
             Screen::Menu,
             Screen::PasswordChallenge,
@@ -295,18 +199,11 @@ mod tests {
             Screen::CountdownChallenge,
             Screen::MazeChallenge,
             Screen::RaceChallenge,
-            Screen::ChestChallenge,
-            Screen::GravityChallenge,
-            Screen::TollChallenge,
-            Screen::ArenaChallenge,
-            Screen::LootChallenge,
-            Screen::CloneChallenge,
-            Screen::FinalChallenge,
             Screen::HillChallenge,
             Screen::MeadowChallenge,
             Screen::WaterparkChallenge,
         ];
-        assert_eq!(screens.len(), 16); // 15 levels + menu
+        assert_eq!(screens.len(), 9); // 8 levels + menu
     }
 }
 
@@ -344,20 +241,30 @@ fn main() {
         .add_sub_state::<CountdownPhase>()
         .add_sub_state::<MazePhase>()
         .add_sub_state::<RacePhase>()
-        .add_sub_state::<ChestPhase>()
-        .add_sub_state::<GravityPhase>()
-        .add_sub_state::<TollPhase>()
-        .add_sub_state::<ArenaPhase>()
-        .add_sub_state::<LootPhase>()
-        .add_sub_state::<ClonePhase>()
-        .add_sub_state::<FinalPhase>()
         .add_sub_state::<HillPhase>()
         .add_sub_state::<MeadowPhase>()
         .add_sub_state::<WaterparkPhase>()
         .init_resource::<Scoreboard>()
         .init_resource::<GamePaused>()
         .init_resource::<shared_ui::CameraOrbit>()
+        .init_resource::<shared_ui::ActiveInput>()
+        .init_resource::<shared_ui::MouseSettings>()
         .add_systems(OnEnter(Screen::Menu), reset_pause)
+        .add_systems(
+            Update,
+            (
+                shared_ui::detect_active_input,
+                shared_ui::update_controls_hint,
+                shared_ui::manage_cursor_grab,
+                shared_ui::update_objective_banner,
+            ),
+        )
+        // Controls (C) / Settings (E) dialogs, everywhere except while typing
+        // the Level 1 password (where E is text input).
+        .add_systems(
+            Update,
+            shared_ui::agenda_controls.run_if(not(in_state(ChallengePhase::PasswordPrompt))),
+        )
         .add_plugins((
             menu::MenuPlugin,
             level1::Level1Plugin,
@@ -366,17 +273,10 @@ fn main() {
             level3::Level3Plugin,
             level4::Level4Plugin,
             level5::Level5Plugin,
-            level6::Level6Plugin,
-            level7::Level7Plugin,
-            level8::Level8Plugin,
-            level9::Level9Plugin,
-            level10::Level10Plugin,
-            level11::Level11Plugin,
-            level12::Level12Plugin,
-            level13::Level13Plugin,
-        ))
-        .add_plugins(level14::Level14Plugin)
-        .add_plugins(level15::Level15Plugin);
+            level101::Level101Plugin,
+            level102::Level102Plugin,
+            level103::Level103Plugin,
+        ));
     #[cfg(feature = "test_bot")]
     app.add_plugins(test_bot::TestBotPlugin);
     app.run();

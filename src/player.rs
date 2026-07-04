@@ -163,6 +163,7 @@ pub fn spawn_player(
         .id()
 }
 
+#[inline(never)]
 pub fn player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
@@ -182,6 +183,36 @@ pub fn player_movement(
     };
     let dt = time.delta_secs();
 
+    // Horizontal movement from input (accelerate/clamp, or apply friction).
+    let input_dir = gather_input_direction(&keyboard, &gamepads);
+    let effective_max_speed = MAX_SPEED
+        * power_ups.as_ref().map_or(1.0, |p| if p.speed_multiplier > 0.0 { p.speed_multiplier } else { 1.0 });
+    apply_horizontal_movement(&mut physics, input_dir, orbit.yaw, effective_max_speed, dt);
+
+    // Jump, then gravity.
+    let gamepad_jump = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::South));
+    let jump_pressed = keyboard.just_pressed(KeyCode::Space) || gamepad_jump;
+    let jump_mult = power_ups.as_ref().map_or(1.0, |p| if p.jump_multiplier > 0.0 { p.jump_multiplier } else { 1.0 });
+    apply_jump(&mut physics, jump_pressed, jump_mult);
+    let grav = gravity_override.as_ref().map_or(GRAVITY, |g| g.0);
+    apply_gravity(&mut physics, grav, dt);
+
+    // Integrate position, clamp to the arena, resolve the ground plane.
+    let was_airborne = !physics.grounded;
+    integrate_position(&mut transform, physics.velocity, dt);
+    apply_movement_bounds(&mut transform, bounds);
+    let ground_y = ground_y_override.as_ref().map_or(GROUND_Y, |g| g.0);
+    apply_ground_collision(&mut transform, &mut physics, &mut squash, ground_y, was_airborne);
+
+    // Face movement direction.
+    let reverse = power_ups.as_ref().map_or(false, |p| p.reverse_facing);
+    update_facing(&mut transform, &mut physics, reverse, dt);
+}
+
+/// Collect the raw (un-normalized, camera-relative-later) move direction from
+/// keyboard + gamepad. `z-` is forward, `x+` is right.
+#[inline(never)]
+fn gather_input_direction(keyboard: &ButtonInput<KeyCode>, gamepads: &Query<&Gamepad>) -> Vec3 {
     let mut input_dir = Vec3::ZERO;
     if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
         input_dir.z -= 1.0;
@@ -197,7 +228,7 @@ pub fn player_movement(
     }
 
     const DEADZONE: f32 = 0.2;
-    for gamepad in &gamepads {
+    for gamepad in gamepads.iter() {
         let stick = gamepad.left_stick();
         if stick.length() > DEADZONE {
             input_dir.x += stick.x;
@@ -209,20 +240,27 @@ pub fn player_movement(
             input_dir.z -= dpad.y;
         }
     }
+    input_dir
+}
 
+/// Rotate the input by the camera yaw and update horizontal velocity: accelerate
+/// (clamped to `max_speed`) when there is input, otherwise apply friction.
+#[inline(never)]
+fn apply_horizontal_movement(
+    physics: &mut PlayerPhysics,
+    mut input_dir: Vec3,
+    orbit_yaw: f32,
+    max_speed: f32,
+    dt: f32,
+) {
     let has_input = input_dir.length_squared() > 0.0;
     if has_input {
-        input_dir = Quat::from_rotation_y(orbit.yaw) * input_dir.normalize();
-    }
-
-    let effective_max_speed = MAX_SPEED * power_ups.as_ref().map_or(1.0, |p| if p.speed_multiplier > 0.0 { p.speed_multiplier } else { 1.0 });
-
-    if has_input {
+        input_dir = Quat::from_rotation_y(orbit_yaw) * input_dir.normalize();
         physics.velocity.x += input_dir.x * ACCELERATION * dt;
         physics.velocity.z += input_dir.z * ACCELERATION * dt;
         let horiz = Vec2::new(physics.velocity.x, physics.velocity.z);
-        if horiz.length() > effective_max_speed {
-            let c = horiz.normalize() * effective_max_speed;
+        if horiz.length() > max_speed {
+            let c = horiz.normalize() * max_speed;
             physics.velocity.x = c.x;
             physics.velocity.z = c.y;
         }
@@ -238,27 +276,50 @@ pub fn player_movement(
             physics.velocity.z = 0.0;
         }
     }
+}
 
-    let gamepad_jump = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::South));
-    if (keyboard.just_pressed(KeyCode::Space) || gamepad_jump) && physics.grounded {
-        let jump_mult = power_ups.as_ref().map_or(1.0, |p| if p.jump_multiplier > 0.0 { p.jump_multiplier } else { 1.0 });
+/// Launch the player upward if a jump was pressed while grounded.
+#[inline(never)]
+fn apply_jump(physics: &mut PlayerPhysics, jump_pressed: bool, jump_mult: f32) {
+    if jump_pressed && physics.grounded {
         physics.velocity.y = JUMP_VELOCITY * jump_mult;
         physics.grounded = false;
     }
+}
+
+/// Apply gravity to vertical velocity while airborne (clamped to terminal speed).
+#[inline(never)]
+fn apply_gravity(physics: &mut PlayerPhysics, gravity: f32, dt: f32) {
     if !physics.grounded {
-        let grav = gravity_override.as_ref().map_or(GRAVITY, |g| g.0);
-        physics.velocity.y += grav * dt;
+        physics.velocity.y += gravity * dt;
         physics.velocity.y = physics.velocity.y.max(-20.0);
     }
+}
 
-    let was_airborne = !physics.grounded;
-    transform.translation += physics.velocity * dt;
+/// Advance the player's position by its velocity over `dt`.
+#[inline(never)]
+fn integrate_position(transform: &mut Transform, velocity: Vec3, dt: f32) {
+    transform.translation += velocity * dt;
+}
 
+/// Clamp the player's XZ position to the level's movement bounds.
+#[inline(never)]
+fn apply_movement_bounds(transform: &mut Transform, bounds: &MovementBounds) {
     let (cx, cz) = bounds.clamp(transform.translation.x, transform.translation.z);
     transform.translation.x = cx;
     transform.translation.z = cz;
+}
 
-    let ground_y = ground_y_override.as_ref().map_or(GROUND_Y, |g| g.0);
+/// Snap the player onto the ground floor, zero vertical velocity, and trigger the
+/// landing squash if they were airborne.
+#[inline(never)]
+fn apply_ground_collision(
+    transform: &mut Transform,
+    physics: &mut PlayerPhysics,
+    squash: &mut SquashState,
+    ground_y: f32,
+    was_airborne: bool,
+) {
     if transform.translation.y <= ground_y {
         transform.translation.y = ground_y;
         physics.velocity.y = 0.0;
@@ -267,13 +328,16 @@ pub fn player_movement(
         }
         physics.grounded = true;
     }
+}
 
-    // Face movement direction with slight tilt (smoothed to avoid flickering)
+/// Smoothly turn the player to face their movement direction, with a slight
+/// forward tilt at speed.
+#[inline(never)]
+fn update_facing(transform: &mut Transform, physics: &mut PlayerPhysics, reverse_facing: bool, dt: f32) {
     let horiz_vel = Vec2::new(physics.velocity.x, physics.velocity.z);
     if horiz_vel.length() > 0.5 {
         let forward = Vec3::new(horiz_vel.x, 0.0, horiz_vel.y).normalize();
-        let reverse = power_ups.as_ref().map_or(false, |p| p.reverse_facing);
-        let facing_dir = if reverse { -forward } else { forward };
+        let facing_dir = if reverse_facing { -forward } else { forward };
         let target_rot = Transform::default().looking_to(facing_dir, Vec3::Y).rotation;
         let turn_speed = (10.0 * dt).min(1.0);
         physics.facing = physics.facing.slerp(target_rot, turn_speed);
@@ -289,14 +353,30 @@ pub fn escape_to_menu(
     gamepads: Query<&Gamepad>,
     game_paused: Res<GamePaused>,
     mut next_screen: ResMut<NextState<crate::Screen>>,
+    mut dialog_q: Query<&mut Node, With<crate::shared_ui::CursorReleaser>>,
 ) {
     if game_paused.0 {
         return;
     }
     let gamepad_back = gamepads.iter().any(|gp| gp.just_pressed(GamepadButton::Select));
-    if keyboard.just_pressed(KeyCode::Escape) || gamepad_back {
-        next_screen.set(crate::Screen::Menu);
+    if !(keyboard.just_pressed(KeyCode::Escape) || gamepad_back) {
+        return;
     }
+
+    // If any dialog (agenda / settings / tutorial) is open, Esc closes it
+    // instead of leaving to the menu.
+    let mut closed_dialog = false;
+    for mut node in &mut dialog_q {
+        if !matches!(node.display, Display::None) {
+            node.display = Display::None;
+            closed_dialog = true;
+        }
+    }
+    if closed_dialog {
+        return;
+    }
+
+    next_screen.set(crate::Screen::Menu);
 }
 
 pub fn toggle_pause(

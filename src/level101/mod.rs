@@ -23,9 +23,9 @@ use race::*;
 use setup::*;
 use terrain::*;
 
-pub struct Level13Plugin;
+pub struct Level101Plugin;
 
-impl Plugin for Level13Plugin {
+impl Plugin for Level101Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::HillChallenge), setup_hill)
             .add_systems(

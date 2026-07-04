@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub(super) struct HillEntity;
 
 #[derive(Component)]

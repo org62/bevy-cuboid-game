@@ -25,7 +25,7 @@ impl Plugin for Level4Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, maze_visual_update, shared_ui::dismiss_hint, shared_ui::follow_camera_system)
+                (animate_player, maze_visual_update, shared_ui::hint_tutorial_controls, shared_ui::follow_camera_system)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::MazeChallenge)),
             )
@@ -43,14 +43,11 @@ impl Plugin for Level4Plugin {
 
 // --- Components ---
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct MazeEntity;
 
 #[derive(Component)]
 struct Trophy;
-
-#[derive(Component)]
-struct BreadcrumbOrb;
 
 #[derive(Component)]
 struct WallVisual;
@@ -64,14 +61,34 @@ const TROPHY_POS: Vec3 = Vec3::new(12.0, 0.5, -10.0);
 const ARENA_MIN: Vec2 = Vec2::new(-2.0, -12.0);
 const ARENA_MAX: Vec2 = Vec2::new(14.0, 2.0);
 const PLAYER_SPAWN: Vec3 = Vec3::new(-1.0, 0.0, 1.0);
+/// Height of the invisible walls, shared by the visual mesh and the collision
+/// gate. A normal jump peaks at ~1.6 units, so it is intentionally taller than
+/// the player can reach by jumping: the only way over is to lift the player's Y
+/// coordinate in memory.
+const WALL_HEIGHT: f32 = 2.5;
+
+const MAZE_TUTORIAL: &str = "\
+The maze walls are invisible and block you on the ground - but they are only so tall. If you lift the player above the walls, you can simply walk over them to the trophy. A normal jump is not high enough, so you must change the player's height directly in memory.
+
+The player's height is its Y coordinate (Transform.translation.y). It reads 0.0 while standing on the ground and only rises while jumping. You don't need to know any exact number - find it by watching how it changes:
+
+1) Stand still on the ground. In your memory scanner, scan for the 4-byte float 0.0 (or start with an 'Unknown initial value' scan).
+2) Press Space to jump; while airborne, run a 'Increased value' scan. Land, then run a 'Decreased value' scan. Repeat jump/land a few times, alternating Increased/Decreased.
+3) The Y coordinate is the address that rises when you jump and returns to 0.0 on the ground. Its two neighbours (+/-4 bytes) are X and Z, since the three floats are contiguous (x, y, z at offsets 0, 4, 8).
+4) Set Y to a value above the walls (e.g. 5.0) and freeze it, then walk over the maze until you are above the trophy - the walls no longer stop you.
+5) Once you are over the trophy, unfreeze Y (or set it back to 0.0) so the player drops down onto it. The trophy only counts as collected when you actually reach it, not while hovering above.";
 
 // --- Debugger-target functions ---
 
 #[inline(never)]
 fn check_trophy_collected(player_pos: Vec3, trophy_pos: Vec3) -> bool {
     let dx = player_pos.x - trophy_pos.x;
+    let dy = player_pos.y - trophy_pos.y;
     let dz = player_pos.z - trophy_pos.z;
-    (dx * dx + dz * dz) < 2.0
+    // Full 3D distance: the player must actually descend onto the trophy, not
+    // just hover above its XZ. Flying over the walls at a high Y gets you to
+    // the trophy's location, but you still have to come back down to collect it.
+    (dx * dx + dy * dy + dz * dz) < 2.0
 }
 
 // --- Invisible wall collision ---
@@ -137,14 +154,19 @@ fn setup_maze(
     commands.insert_resource(ClearColor(Color::srgb(0.08, 0.1, 0.15)));
     commands.insert_resource(WallsVisible::default());
 
-    // Dark green ground
+    // Dark green ground, sized to exactly cover the walkable arena so the
+    // colored floor and the reachable area agree.
+    let ground_w = ARENA_MAX.x - ARENA_MIN.x;
+    let ground_d = ARENA_MAX.y - ARENA_MIN.y;
+    let ground_cx = (ARENA_MIN.x + ARENA_MAX.x) * 0.5;
+    let ground_cz = (ARENA_MIN.y + ARENA_MAX.y) * 0.5;
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 16.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(ground_w, ground_d))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.12, 0.22, 0.1),
             ..default()
         })),
-        Transform::from_xyz(6.0, 0.0, -5.0),
+        Transform::from_xyz(ground_cx, 0.0, ground_cz),
         MazeEntity,
     ));
 
@@ -194,34 +216,11 @@ fn setup_maze(
         let cx = (wall.min.x + wall.max.x) * 0.5;
         let cz = (wall.min.y + wall.max.y) * 0.5;
         commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(w, 1.5, h))),
+            Mesh3d(meshes.add(Cuboid::new(w, WALL_HEIGHT, h))),
             MeshMaterial3d(wall_visual_mat.clone()),
-            Transform::from_xyz(cx, 0.75, cz),
+            Transform::from_xyz(cx, WALL_HEIGHT * 0.5, cz),
             Visibility::Hidden,
             WallVisual,
-            MazeEntity,
-        ));
-    }
-
-    // Breadcrumb orbs at dead ends
-    let dead_end_positions = [
-        Vec3::new(8.5, 0.4, -2.0),   // dead end near trap wall after Row A
-        Vec3::new(13.0, 0.4, -5.5),  // dead end in right corridor between B and C
-        Vec3::new(-1.0, 0.4, -8.0),  // dead end left of Row C
-        Vec3::new(4.0, 0.4, -8.0),   // dead end in false corridor near trap
-    ];
-    let red_orb_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.8, 0.15, 0.1),
-        emissive: LinearRgba::new(0.5, 0.1, 0.05, 1.0),
-        ..default()
-    });
-    let orb_mesh = meshes.add(Sphere::new(0.15));
-    for pos in &dead_end_positions {
-        commands.spawn((
-            Mesh3d(orb_mesh.clone()),
-            MeshMaterial3d(red_orb_mat.clone()),
-            Transform::from_translation(*pos),
-            BreadcrumbOrb,
             MazeEntity,
         ));
     }
@@ -267,16 +266,22 @@ fn setup_maze(
     // HUD
     shared_ui::spawn_controls_hint(
         &mut commands,
-        "[Esc] Menu | WASD Move | Space Jump | [P] Pause",
+        "Reach the trophy",
         MazeEntity,
     );
 
-    // Hint
+    // Hint box + tutorial modal (hidden; H reveals the hint, T the tutorial)
     if !scoreboard.is_solved(4) {
-        shared_ui::spawn_hint_box(
+        shared_ui::spawn_hint_box_with_tutorial(
             &mut commands,
-            "The path is hidden, but your position is not. What if you could simply... be somewhere else? Look for Transform.translation.",
-            280.0,
+            "Your Y (jump) coordinate is zero when the player is on the ground. The walls only reach so high...",
+            300.0,
+            MazeEntity,
+        );
+        shared_ui::spawn_hint_modal(
+            &mut commands,
+            "Invisible Maze - Full Solution",
+            MAZE_TUTORIAL,
             MazeEntity,
         );
     }
@@ -294,10 +299,13 @@ fn maze_playing_update(
         return;
     };
 
-    // Apply invisible wall collision — push player out by minimum penetration
+    // Apply invisible wall collision — push player out by minimum penetration.
+    // Walls only block up to WALL_HEIGHT: lift the player's Y above the wall
+    // top and they pass straight over (the intended debugger solution).
     let walls = wall_rects();
     let radius = 0.4;
-    for w in &walls {
+    if pt.translation.y < WALL_HEIGHT {
+      for w in &walls {
         let px = pt.translation.x;
         let pz = pt.translation.z;
         if px + radius > w.min.x && px - radius < w.max.x
@@ -319,6 +327,7 @@ fn maze_playing_update(
                 pt.translation.z = w.max.y + radius;
             }
         }
+      }
     }
 
     // Check trophy
@@ -364,10 +373,17 @@ fn handle_victory(
     mut events: EventReader<KeyboardInput>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut scoreboard: ResMut<Scoreboard>,
+    mut walls_visible: ResMut<WallsVisible>,
+    mut wall_q: Query<&mut Visibility, With<WallVisual>>,
     overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
     if overlay_q.is_empty() {
         scoreboard.set_solved(4);
+        // Reveal the maze the player just bypassed.
+        walls_visible.0 = true;
+        for mut v in &mut wall_q {
+            *v = Visibility::Visible;
+        }
         shared_ui::spawn_victory_overlay(
             &mut commands,
             "TROPHY COLLECTED!",
@@ -448,6 +464,18 @@ mod tests {
     fn trophy_position_is_not_in_wall() {
         let walls = wall_rects();
         assert!(!collides_with_walls(TROPHY_POS.x, TROPHY_POS.z, &walls));
+    }
+
+    #[test]
+    fn trophy_not_collected_while_hovering_above() {
+        // Flying over the walls at a high Y and hovering above the trophy's XZ
+        // must NOT collect it — the player has to descend onto it.
+        let hovering = Vec3::new(TROPHY_POS.x, 5.0, TROPHY_POS.z);
+        assert!(!check_trophy_collected(hovering, TROPHY_POS));
+
+        // Dropping back down onto the trophy collects it.
+        let landed = Vec3::new(TROPHY_POS.x, 0.0, TROPHY_POS.z);
+        assert!(check_trophy_collected(landed, TROPHY_POS));
     }
 
     #[test]

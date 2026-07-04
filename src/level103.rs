@@ -7,9 +7,9 @@ use crate::player::{
 use crate::shared_ui;
 use crate::{Screen, Scoreboard, WaterparkPhase};
 
-pub struct Level15Plugin;
+pub struct Level103Plugin;
 
-impl Plugin for Level15Plugin {
+impl Plugin for Level103Plugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(Screen::WaterparkChallenge), setup_waterpark)
             .add_systems(
@@ -41,7 +41,7 @@ impl Plugin for Level15Plugin {
 
 // --- Components ---
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct WaterparkEntity;
 
 #[derive(Component)]
@@ -427,7 +427,7 @@ fn setup_waterpark(
         });
     shared_ui::spawn_controls_hint(
         &mut commands,
-        "[ESC] Menu  |  [WASD] Move  |  [Space] Jump  |  [P] Pause",
+        "Ride all 5 slides",
         WaterparkEntity,
     );
 }
@@ -720,7 +720,7 @@ fn slides_complete_check(
     mut next_phase: ResMut<NextState<WaterparkPhase>>,
 ) {
     if ridden.0.iter().all(|&b| b) {
-        scoreboard.set_solved(15);
+        scoreboard.set_solved(103);
         next_phase.set(WaterparkPhase::Victory);
     }
 }
