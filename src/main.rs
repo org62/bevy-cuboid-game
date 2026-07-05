@@ -10,6 +10,7 @@ mod menu;
 mod password;
 mod player;
 pub mod shared_ui;
+pub mod terrain;
 pub mod walls;
 #[cfg(feature = "test_bot")]
 mod test_bot;

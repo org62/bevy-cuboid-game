@@ -14,7 +14,6 @@ pub(super) fn apply_slide_force(friction: f32, velocity: &mut Vec3, direction: V
 }
 
 #[inline(never)]
-#[allow(dead_code)]
 pub(super) fn check_summit_reached(player_pos: Vec3) -> bool {
     let flag_pos = Vec3::new(0.0, 10.0, 0.0);
     let dx = player_pos.x - flag_pos.x;

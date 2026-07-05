@@ -945,11 +945,31 @@ pub fn setup_level_lighting(
 
 // --- Camera follow ---
 
+/// Inflation of occluder boxes toward the camera — acts as the camera's
+/// "radius" so the near plane (0.1) never pokes through a wall face.
+const OCCLUSION_PAD_XZ: f32 = 0.35;
+const OCCLUSION_PAD_Y: f32 = 0.2;
+/// The occlusion ray starts at the player's torso, not the feet. Load-bearing:
+/// the feet rest exactly on surface tops, so an unlifted origin would sit ON
+/// the top face of any walk-on occluder and false-hit at t=0 every frame.
+const OCCLUSION_ORIGIN_LIFT: f32 = 0.6;
+/// Never pull the camera closer than this to the player.
+const MIN_CAMERA_DISTANCE: f32 = 0.6;
+/// Easing rate (per second) for the camera moving back OUT when an occlusion
+/// clears. Pulling IN is instant — the camera must never spend a frame
+/// behind a wall.
+const OCCLUSION_RECOVER_RATE: f32 = 4.0;
+
 pub fn follow_camera_system(
     player_q: Query<(&Transform, &PlayerPhysics), (With<Player>, Without<FollowCamera>)>,
     mut cam_q: Query<(&mut Transform, &FollowCamera), Without<Player>>,
+    occluders: Query<
+        &crate::terrain::SolidBlock,
+        With<crate::terrain::CameraOccluder>,
+    >,
     orbit: Res<CameraOrbit>,
     mut smoothed: Local<Option<Vec3>>,
+    mut occ_dist: Local<Option<f32>>,
     time: Res<Time>,
 ) {
     let Ok((player_tf, physics)) = player_q.get_single() else { return };
@@ -958,6 +978,7 @@ pub fn follow_camera_system(
     let p = player_tf.translation;
     let s = *smoothed.get_or_insert(p);
     let new_s = if s.distance_squared(p) > 100.0 {
+        *occ_dist = None; // teleport: don't carry over a pulled-in distance
         p
     } else {
         let txz = (15.0 * dt).min(1.0);
@@ -975,7 +996,37 @@ pub fn follow_camera_system(
     // responsive. Follow smoothing already happens on `new_s` above; lerping
     // the translation too would double-smooth and add rotation input lag.
     let rot = Quat::from_rotation_y(orbit.yaw) * Quat::from_rotation_x(orbit.pitch);
-    cam_tf.translation = new_s + rot * (follow.offset * orbit.zoom);
+    let target = new_s + rot * (follow.offset * orbit.zoom);
+
+    // Occlusion: cast from the player's torso toward the desired camera spot
+    // and clamp to the nearest tagged wall, so the camera dollies in front of
+    // geometry instead of clipping inside it. Levels without CameraOccluder
+    // entities skip the loop entirely.
+    let ray_origin = new_s + follow.look_offset + Vec3::Y * OCCLUSION_ORIGIN_LIFT;
+    let to_cam = target - ray_origin;
+    let full = to_cam.length();
+    if full > 1e-4 {
+        let dir = to_cam / full;
+        let mut allowed = full;
+        for block in &occluders {
+            if let Some(t) =
+                block.ray_entry(ray_origin, dir, full, OCCLUSION_PAD_XZ, OCCLUSION_PAD_Y)
+            {
+                allowed = allowed.min(t);
+            }
+        }
+        allowed = allowed.max(MIN_CAMERA_DISTANCE);
+        let cur = occ_dist.get_or_insert(full);
+        if allowed < *cur {
+            *cur = allowed; // pull in instantly
+        } else {
+            *cur += (allowed - *cur) * (OCCLUSION_RECOVER_RATE * dt).min(1.0);
+        }
+        *cur = cur.min(full); // zooming/orbiting closer is never blocked
+        cam_tf.translation = ray_origin + dir * *cur;
+    } else {
+        cam_tf.translation = target;
+    }
     cam_tf.look_at(new_s + follow.look_offset, Vec3::Y);
 }
 

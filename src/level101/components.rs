@@ -31,36 +31,9 @@ pub(super) struct PowerUpBarBg {
     pub kind: AppleKind,
 }
 
-/// Marks a terrain surface for collision.
-/// min/max define the XZ bounds, y is the surface height.
-#[derive(Component)]
-pub(super) struct TerrainSurface {
-    pub min: Vec2,
-    pub max: Vec2,
-    pub y: f32,
-}
-
-/// Solid wall collision box - blocks horizontal movement.
-/// min/max are XZ bounds, y_min/y_max are vertical bounds.
-#[derive(Component)]
-pub(super) struct SolidBlock {
-    pub min: Vec2,
-    pub max: Vec2,
-    pub y_min: f32,
-    pub y_max: f32,
-}
-
 /// Marks a slide segment for the slide force system.
 #[derive(Component)]
 pub(super) struct SlideSegment {
-    pub min: Vec2,
-    pub max: Vec2,
-    pub y: f32,
-}
-
-/// Marks a water slide segment that auto-carries the player toward the pool (-x direction).
-#[derive(Component)]
-pub(super) struct WaterSlideSegment {
     pub min: Vec2,
     pub max: Vec2,
     pub y: f32,

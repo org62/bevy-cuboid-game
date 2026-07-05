@@ -12,6 +12,7 @@ use bevy::prelude::*;
 
 use crate::player::{animate_player, escape_to_menu, player_movement, toggle_pause, PlayerMovementSet};
 use crate::shared_ui;
+use crate::terrain::terrain_collision;
 use crate::{HillPhase, Screen};
 
 #[cfg(feature = "test_bot")]
@@ -34,6 +35,7 @@ impl Plugin for Level101Plugin {
                     shared_ui::update_camera_orbit.before(PlayerMovementSet),
                     player_movement.in_set(PlayerMovementSet),
                     terrain_collision,
+                    summit_victory_check,
                 )
                     .chain()
                     .run_if(in_state(HillPhase::Playing)),

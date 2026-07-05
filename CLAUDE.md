@@ -1,5 +1,19 @@
 # Engineering notes for this codebase
 
+## Terrain collision lives in `src/terrain.rs` — don't fork it
+
+All player-vs-terrain collision (surface snapping, wall pushout, ceilings)
+is the single shared system `terrain_collision` in `src/terrain.rs`,
+parameterized per level by the `TerrainConfig` resource (inserted on level
+enter, removed on exit; without it the system is a no-op). The shared
+module also owns the `TerrainSurface`, `SolidBlock` and `WaterSlideSegment`
+components. When a new level needs terrain collision, insert a
+`TerrainConfig` and register the shared system after `player_movement` —
+do not write a new per-level collision system. If the player is under
+scripted motion (zipline, cutscene), insert `TerrainPhysicsExempt` on the
+player for the duration instead of adding query filters to the shared
+system.
+
 ## Player vs world collision: always sweep, never point-sample
 
 Per-frame collision in this game runs after `player_movement` updates the
@@ -8,8 +22,8 @@ current XZ that is at/below `player.y + tolerance`" — silently fails in
 two cases:
 
 1. **Horizontal sweep skip.** When `velocity_xz * dt` exceeds the smallest
-   collider footprint along the motion axis (Level 13 slide steps are
-   2 units wide; Level 14 cells are `CELL` units), the player is over a
+   collider footprint along the motion axis (Level 101 slide steps are
+   2 units wide; Level 102 cells are `CELL` units), the player is over a
    *different* surface each frame and never satisfies the snap condition for
    the surfaces they pass over. The visible result is "player keeps falling
    past surfaces."
@@ -41,9 +55,28 @@ against surface entities:
   intermediate XZs that are neither the previous nor the current cell.
   Keep step-down gated to surfaces above the void floor so the player
   doesn't snap through into nothing.
+- **Ease only grounded steps; never ease a tunneling catch.** Grounded
+  step-up/step-down transitions move toward the surface at
+  `TerrainConfig::step_ease_rate` (15 u/s) so walking over uneven ground is
+  smooth instead of a per-cell teleport. Airborne landings, swept crossings
+  and phased-below rescues must still snap instantly — easing those lets
+  the player visibly pass through geometry. Do not add a second, visual-only
+  smoothing layer on top (the old `animate_player` mesh-offset lag caused
+  the player to hover above steps whenever its rate diverged from the
+  physics rate); the physics ease is the single source of smoothing.
 
-Reference implementations: `terrain_collision` in `src/level14.rs` and
-`src/level13/terrain.rs` both follow this pattern.
+Reference implementation: `terrain_collision` in `src/terrain.rs`
+(`find_support` / `resolve_vertical` are the unit-tested pure core).
+
+## Camera occlusion is opt-in via `CameraOccluder`
+
+`follow_camera_system` pulls the camera in along the player→camera
+sightline so it never clips inside geometry — but only against
+`SolidBlock`s tagged with the `CameraOccluder` marker (`src/terrain.rs`).
+Tag walls and tall opaque structures; do NOT tag walk-on/ride-on platforms
+(stairs, slide segments, low tables) or invisible movement barriers, or the
+camera will twitch every time the sightline grazes something the player is
+standing on.
 
 ## Visible mesh and collision surface must agree on the top
 

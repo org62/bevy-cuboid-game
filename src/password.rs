@@ -263,8 +263,14 @@ fn update_password_display(
     }
 }
 
+// Both dismiss handlers below use `ButtonInput::just_pressed` rather than
+// reading `KeyboardInput` events: a fresh system's EventReader starts by
+// consuming every still-buffered event, so the Enter that SUBMITTED the
+// password (alive for two frames) would immediately dismiss the result
+// screen the player was meant to read.
+
 fn handle_wrong_password(
-    mut events: EventReader<KeyboardInput>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut next_phase: ResMut<NextState<ChallengePhase>>,
     mut player_query: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
     mut result_query: Query<(&mut Text, &mut TextColor), With<ResultText>>,
@@ -275,10 +281,7 @@ fn handle_wrong_password(
         *color = TextColor(Color::srgb(1.0, 0.3, 0.3));
     }
 
-    for event in events.read() {
-        if !event.state.is_pressed() {
-            continue;
-        }
+    if keyboard.get_just_pressed().next().is_some() {
         if let Ok((mut transform, mut physics)) = player_query.get_single_mut() {
             transform.translation = PLAYER_PUSHBACK;
             physics.velocity = Vec3::ZERO;
@@ -286,12 +289,11 @@ fn handle_wrong_password(
             physics.facing = Quat::from_rotation_y(std::f32::consts::PI);
         }
         next_phase.set(ChallengePhase::Exploring);
-        return;
     }
 }
 
 fn handle_access_granted(
-    mut events: EventReader<KeyboardInput>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mut next_screen: ResMut<NextState<Screen>>,
     mut result_query: Query<(&mut Text, &mut TextColor), With<ResultText>>,
 ) {
@@ -301,12 +303,8 @@ fn handle_access_granted(
         *color = TextColor(Color::srgb(0.2, 1.0, 0.2));
     }
 
-    for event in events.read() {
-        if !event.state.is_pressed() {
-            continue;
-        }
+    if keyboard.get_just_pressed().next().is_some() {
         next_screen.set(Screen::Menu);
-        return;
     }
 }
 

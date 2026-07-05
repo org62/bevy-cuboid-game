@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::player::{Player, PlayerBody, PlayerHead, PlayerPhysics};
+use crate::terrain::{CameraOccluder, SolidBlock, TerrainPhysicsExempt};
 use crate::walls::spawn_maze_grid_walls;
 
 use super::components::*;
@@ -95,6 +96,7 @@ pub(super) fn spawn_maze_interior(
                     y_min: 0.0,
                     y_max: wall_h,
                 },
+                CameraOccluder,
                 HillEntity,
                 MazeInteriorWall,
             ));
@@ -157,12 +159,15 @@ pub(super) fn maze_exit_check_system(
     for zone in &exit_zones {
         if px >= zone.min.x && px <= zone.max.x && pz >= zone.min.y && pz <= zone.max.y {
             commands.insert_resource(MazeCompleted);
-            commands.entity(player_entity).insert(SuckUpAnimation {
-                start_pos: player_tf.translation,
-                end_pos: Vec3::new(21.0, 0.5, -10.0),
-                elapsed: 0.0,
-                duration: 2.0,
-            });
+            commands.entity(player_entity).insert((
+                SuckUpAnimation {
+                    start_pos: player_tf.translation,
+                    end_pos: Vec3::new(21.0, 0.5, -10.0),
+                    elapsed: 0.0,
+                    duration: 2.0,
+                },
+                TerrainPhysicsExempt,
+            ));
             break;
         }
     }
@@ -217,7 +222,7 @@ pub(super) fn suck_up_animation_system(
         if t >= 1.0 {
             transform.translation = end;
             physics.grounded = true;
-            commands.entity(entity).remove::<SuckUpAnimation>();
+            commands.entity(entity).remove::<(SuckUpAnimation, TerrainPhysicsExempt)>();
             commands.remove_resource::<MazeCompleted>();
             commands.insert_resource(MazeNeedsRebuild);
 
@@ -314,12 +319,15 @@ pub(super) fn zip_line_trigger_system(
         let dz = pp.z - center.z;
         let dy = (pp.y - center.y).abs();
         if dx * dx + dz * dz < PICKUP_RADIUS * PICKUP_RADIUS && dy < 1.5 {
-            commands.entity(player_entity).insert(ZipLineRide {
-                start: Vec3::new(0.0, 10.5, -2.5),
-                end: Vec3::new(21.0, 0.5, -13.0),
-                elapsed: 0.0,
-                duration: 2.5,
-            });
+            commands.entity(player_entity).insert((
+                ZipLineRide {
+                    start: Vec3::new(0.0, 10.5, -2.5),
+                    end: Vec3::new(21.0, 0.5, -13.0),
+                    elapsed: 0.0,
+                    duration: 2.5,
+                },
+                TerrainPhysicsExempt,
+            ));
             return;
         }
     }
@@ -353,7 +361,7 @@ pub(super) fn zip_line_ride_system(
         if t >= 1.0 {
             transform.translation = end;
             physics.grounded = true;
-            commands.entity(entity).remove::<ZipLineRide>();
+            commands.entity(entity).remove::<(ZipLineRide, TerrainPhysicsExempt)>();
         }
     }
 }

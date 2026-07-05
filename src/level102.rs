@@ -2,9 +2,10 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GroundYOverride,
-    MovementBounds, Player, PlayerMovementSet, PlayerPhysics, SquashState,
+    MovementBounds, Player, PlayerMovementSet,
 };
 use crate::shared_ui;
+use crate::terrain::{terrain_collision, ColumnPushout, TerrainConfig, TerrainSurface};
 use crate::{MeadowPhase, Screen, Scoreboard};
 
 pub struct Level102Plugin;
@@ -44,13 +45,6 @@ struct TerrainCell {
     cz: f32,
     current_h: f32,
     target_h: f32,
-}
-
-#[derive(Component)]
-struct TerrainSurface {
-    min: Vec2,
-    max: Vec2,
-    y: f32,
 }
 
 #[derive(Component)]
@@ -104,7 +98,6 @@ const CELL: f32 = 2.0;
 const GRID: i32 = 40;
 const Y_BASE: f32 = -8.0;
 const COLUMN_THICKNESS: f32 = 4.0;
-const PLAYER_BODY_H: f32 = 1.8;
 const STEP_LIMIT: f32 = 1.5;
 const VOID_HR: f32 = -50.0;
 const HEIGHT_STEP: f32 = 0.2;
@@ -387,6 +380,16 @@ fn setup_meadow(
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.5, 0.78, 0.95)));
     commands.insert_resource(GroundYOverride(Y_BASE));
+    commands.insert_resource(TerrainConfig {
+        step_up_limit: STEP_LIMIT,
+        tolerance_max: 4.0,
+        pushout_margin: 0.4,
+        column_pushout: Some(ColumnPushout {
+            thickness: COLUMN_THICKNESS,
+            base_y: Y_BASE,
+        }),
+        ..TerrainConfig::standard(Y_BASE)
+    });
 
     let bands: [Handle<StandardMaterial>; 6] = [
         materials.add(StandardMaterial { base_color: Color::srgb(0.4, 0.28, 0.15), ..default() }),
@@ -615,164 +618,6 @@ fn setup_meadow(
     shared_ui::spawn_controls_hint(&mut commands, "Reach the flag", MeadowEntity);
 }
 
-// --- Terrain collision ---
-
-fn terrain_collision(
-    surfaces: Query<&TerrainSurface>,
-    mut player_q: Query<(&mut Transform, &mut PlayerPhysics, &mut SquashState), With<Player>>,
-    time: Res<Time>,
-) {
-    let Ok((mut transform, mut physics, mut squash)) = player_q.get_single_mut() else { return };
-    let was_airborne = !physics.grounded;
-    let dt = time.delta_secs();
-
-    // Horizontal pushout — keep the player out of any cell column that's too
-    // tall to step onto. Cells render as top-anchored COLUMN_THICKNESS-thick
-    // slabs (clamped to Y_BASE), and we model the same shape for collision so
-    // that the underground (well below visual_top - COLUMN_THICKNESS) stays
-    // free even where ground cells exist above. Pattern adapted from
-    // src/level13/terrain.rs:21–67.
-    let margin = 0.4;
-    for _ in 0..3 {
-        let mut pushed = false;
-        let px = transform.translation.x;
-        let pz = transform.translation.z;
-        let py = transform.translation.y;
-        for surf in &surfaces {
-            // Skip degenerate / void cells (anchored at or below floor).
-            if surf.y <= Y_BASE + 0.1 { continue; }
-            // On top of the slab — let the snap/step logic handle vertical state.
-            if py >= surf.y - 0.05 { continue; }
-            // Step-up zone: handled below by snap, no horizontal push.
-            if py >= surf.y - STEP_LIMIT { continue; }
-
-            let col_bottom = (surf.y - COLUMN_THICKNESS).max(Y_BASE);
-            let body_top = py + PLAYER_BODY_H;
-            let v_overlap = body_top.min(surf.y) - py.max(col_bottom);
-            if v_overlap < 0.3 { continue; }
-
-            // XZ AABB check
-            if !(px + margin > surf.min.x && px - margin < surf.max.x
-                && pz + margin > surf.min.y && pz - margin < surf.max.y)
-            {
-                continue;
-            }
-
-            let push_left = (px + margin) - surf.min.x;
-            let push_right = surf.max.x - (px - margin);
-            let push_front = (pz + margin) - surf.min.y;
-            let push_back = surf.max.y - (pz - margin);
-            let min_push = push_left.min(push_right).min(push_front).min(push_back);
-
-            if min_push == push_left {
-                transform.translation.x = surf.min.x - margin;
-                physics.velocity.x = physics.velocity.x.min(0.0);
-            } else if min_push == push_right {
-                transform.translation.x = surf.max.x + margin;
-                physics.velocity.x = physics.velocity.x.max(0.0);
-            } else if min_push == push_front {
-                transform.translation.z = surf.min.y - margin;
-                physics.velocity.z = physics.velocity.z.min(0.0);
-            } else {
-                transform.translation.z = surf.max.y + margin;
-                physics.velocity.z = physics.velocity.z.max(0.0);
-            }
-            pushed = true;
-        }
-        if !pushed { break; }
-    }
-
-    let px = transform.translation.x;
-    let pz = transform.translation.z;
-
-    // Previous-frame position. player_movement already advanced the transform
-    // by `velocity * dt`, so subtracting it back gives where the player was
-    // before this frame's motion. Used for the swept-path test below.
-    let prev_x = px - physics.velocity.x * dt;
-    let prev_y = transform.translation.y - physics.velocity.y * dt;
-    let prev_z = pz - physics.velocity.z * dt;
-
-    // Tolerance: how far above the player we look for surfaces to stand on.
-    // When jumping (vy > 0) we use 0 so we don't snap to surfaces above us.
-    let tolerance = if physics.velocity.y <= 0.0 {
-        (physics.velocity.y.abs() * dt + 1.5).min(4.0)
-    } else {
-        0.0
-    };
-
-    // Surface search.
-    //   best_y      — highest surface the player should land on this frame
-    //   any_surface — highest surface at player XZ regardless of tolerance (fallback)
-    // We consider any surface whose XZ overlaps EITHER the previous or the
-    // current player position so that high-speed diagonal motion can't slip
-    // between cells without being checked.
-    let mut best_y = Y_BASE;
-    let mut any_surface = Y_BASE;
-    for surf in &surfaces {
-        let in_now = px >= surf.min.x && px <= surf.max.x && pz >= surf.min.y && pz <= surf.max.y;
-        let in_prev = prev_x >= surf.min.x && prev_x <= surf.max.x
-            && prev_z >= surf.min.y && prev_z <= surf.max.y;
-        if !(in_now || in_prev) { continue; }
-
-        if in_now && surf.y > any_surface {
-            any_surface = surf.y;
-        }
-        // Standing / phase-through-vertically check (only at current XZ).
-        if in_now && surf.y <= transform.translation.y + tolerance && surf.y > best_y {
-            best_y = surf.y;
-        }
-        // Swept check: if the player's y crossed this surface during the frame
-        // while moving downward, this surface should catch them — even if their
-        // XZ is now over a different cell whose surface is much lower. This is
-        // what fixes "player keeps falling past visible surfaces" when running
-        // off the edge of taller cells with high horizontal velocity.
-        if physics.velocity.y <= 0.0
-            && prev_y >= surf.y - 0.05
-            && transform.translation.y < surf.y
-            && surf.y > best_y
-        {
-            best_y = surf.y;
-        }
-    }
-
-    // Fallback: if the normal search found nothing but there IS a surface here,
-    // the player has phased below all surfaces. Push them up.
-    if best_y <= Y_BASE + 0.1 && any_surface > Y_BASE + 0.1 && physics.velocity.y <= 0.0 {
-        best_y = any_surface;
-    }
-
-    // Snap fires when:
-    //   - player is at/below the surface (normal landing), OR
-    //   - swept check shows they crossed the surface during the frame, OR
-    //   - step-down: player was statically grounded last frame and is walking
-    //     off a small ledge. Without this, fast horizontal motion lets them
-    //     float over and tunnel past the next several cells before falling
-    //     enough to be caught at the new XZ. Gated on `vy.abs < 0.01` so
-    //     active jumps and falls aren't intercepted.
-    let crossed = physics.velocity.y <= 0.0 && prev_y >= best_y && transform.translation.y < best_y;
-    let static_grounded_last = !was_airborne && physics.velocity.y.abs() < 0.01;
-    let step_down = static_grounded_last
-        && transform.translation.y > best_y
-        && transform.translation.y - best_y <= 1.5
-        && best_y > Y_BASE + 0.1;
-    if (transform.translation.y <= best_y + 0.1 || crossed || step_down) && physics.velocity.y <= 0.0 {
-        transform.translation.y = best_y;
-        physics.velocity.y = 0.0;
-        if was_airborne {
-            squash.timer = 0.2;
-        }
-        physics.grounded = true;
-    } else if transform.translation.y > best_y + 1.5 {
-        physics.grounded = false;
-    }
-
-    // Smooth slope descent: gently lower when walking downhill.
-    // Player is ABOVE the surface here (safe, no clipping).
-    if physics.grounded && transform.translation.y > best_y + 0.02 && best_y > Y_BASE + 0.1 {
-        transform.translation.y = (transform.translation.y - 15.0 * dt).max(best_y);
-    }
-}
-
 // --- Goal check ---
 
 fn goal_check(
@@ -974,6 +819,7 @@ fn cleanup_meadow(mut commands: Commands, query: Query<Entity, With<MeadowEntity
         commands.entity(entity).despawn_recursive();
     }
     commands.remove_resource::<GroundYOverride>();
+    commands.remove_resource::<TerrainConfig>();
     commands.remove_resource::<MeadowState>();
     commands.remove_resource::<TerrainMaterials>();
 }

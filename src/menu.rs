@@ -66,7 +66,7 @@ const HIDDEN_LEVELS: [(u32, &str); 3] = [
     (103, "The Indoor Waterpark"),
 ];
 
-fn screen_for_level(level: u32) -> Option<Screen> {
+pub(crate) fn screen_for_level(level: u32) -> Option<Screen> {
     match level {
         1 => Some(Screen::PasswordChallenge),
         2 => Some(Screen::CannonChallenge),
@@ -81,7 +81,7 @@ fn screen_for_level(level: u32) -> Option<Screen> {
 }
 
 /// Ordered list of the level ids the player can currently pick.
-fn visible_levels(revealed: bool) -> Vec<u32> {
+pub(crate) fn visible_levels(revealed: bool) -> Vec<u32> {
     let mut v: Vec<u32> = REGULAR_LEVELS.iter().map(|(l, _)| *l).collect();
     if revealed {
         v.extend(HIDDEN_LEVELS.iter().map(|(l, _)| *l));

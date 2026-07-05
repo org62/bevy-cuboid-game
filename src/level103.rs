@@ -2,9 +2,13 @@ use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GroundYOverride,
-    MovementBounds, Player, PlayerMovementSet, PlayerPhysics, SquashState,
+    MovementBounds, Player, PlayerMovementSet, PlayerPhysics,
 };
 use crate::shared_ui;
+use crate::terrain::{
+    terrain_collision, CameraOccluder, SolidBlock, TerrainConfig, TerrainSurface,
+    WaterSlideSegment, SLIDE_CARRY_SPEED,
+};
 use crate::{Screen, Scoreboard, WaterparkPhase};
 
 pub struct Level103Plugin;
@@ -44,29 +48,10 @@ impl Plugin for Level103Plugin {
 #[derive(Component, Clone, Copy)]
 struct WaterparkEntity;
 
+/// Which colored slide a [`WaterSlideSegment`] belongs to (index into
+/// [`SlidesRidden`]).
 #[derive(Component)]
-struct TerrainSurface {
-    min: Vec2,
-    max: Vec2,
-    y: f32,
-}
-
-#[derive(Component)]
-struct SolidBlock {
-    min: Vec2,
-    max: Vec2,
-    y_min: f32,
-    y_max: f32,
-}
-
-#[derive(Component)]
-struct WaterSlideSegment {
-    min: Vec2,
-    max: Vec2,
-    y: f32,
-    direction: Vec3,
-    color_idx: usize,
-}
+struct SlideId(usize);
 
 #[derive(Component)]
 struct SnackItem {
@@ -87,11 +72,11 @@ const ROOM_Z: f32 = 20.0;
 // Short perimeter walls so the over-the-shoulder camera can see over them.
 // (A taller enclosure would put the wall mesh between the camera and the player.)
 const WALL_HEIGHT: f32 = 2.5;
-const POOL_X: f32 = 7.0;
-const POOL_Z: f32 = 7.0;
+pub(crate) const POOL_X: f32 = 7.0;
+pub(crate) const POOL_Z: f32 = 7.0;
 const POOL_DEPTH: f32 = 2.0;
 const WATER_Y: f32 = -0.3;
-const DECK_TOP: f32 = 8.0;
+pub(crate) const DECK_TOP: f32 = 8.0;
 const PLAYER_SPAWN: Vec3 = Vec3::new(15.0, 0.0, 15.0);
 const CAM_OFFSET: Vec3 = Vec3::new(0.0, 22.0, 18.0);
 
@@ -104,6 +89,7 @@ fn setup_waterpark(
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.7, 0.85, 0.95)));
     commands.insert_resource(GroundYOverride(-2.5));
+    commands.insert_resource(TerrainConfig::standard(-POOL_DEPTH - 0.5));
     commands.insert_resource(SlidesRidden::default());
 
     // --- Materials ---
@@ -195,6 +181,7 @@ fn setup_waterpark(
                 y_min: -POOL_DEPTH,
                 y_max: 0.0,
             },
+            CameraOccluder,
             WaterparkEntity,
         ));
     }
@@ -223,6 +210,7 @@ fn setup_waterpark(
             &mut commands, &mut meshes, &pool_floor_mat,
             Vec2::new(stair_x_min, z_min), Vec2::new(stair_x_max, z_max),
             -POOL_DEPTH, y_top,
+            false, // walk-on steps: don't occlude the camera
         );
     }
 
@@ -254,6 +242,7 @@ fn setup_waterpark(
     spawn_block(
         &mut commands, &mut meshes, &deck_mat,
         deck_min, deck_max, 0.0, DECK_TOP,
+        true, // 8-unit-tall block: the camera must not see through it
     );
 
     // --- Staircase from floor up to the deck (right side, x=14..18) ---
@@ -272,6 +261,7 @@ fn setup_waterpark(
             &mut commands, &mut meshes, &stair_mat,
             Vec2::new(stair_x_min, z_min), Vec2::new(stair_x_max, z_max),
             0.0, y_top,
+            false, // walk-on steps: don't occlude the camera
         );
     }
 
@@ -310,14 +300,16 @@ fn setup_waterpark(
             ));
             let min = Vec2::new(cx - slide_w / 2.0, z_min);
             let max = Vec2::new(cx + slide_w / 2.0, z_max);
+            // Ride-on geometry: deliberately NOT a CameraOccluder — the camera
+            // trails directly over the slide while the player rides it.
             commands.spawn((
                 TerrainSurface { min, max, y: y_top },
                 SolidBlock { min, max, y_min: y_bot, y_max: y_top },
                 WaterSlideSegment {
                     min, max, y: y_top,
                     direction: Vec3::new(0.0, 0.0, 1.0),
-                    color_idx: col_i,
                 },
+                SlideId(col_i),
                 WaterparkEntity,
             ));
         }
@@ -329,6 +321,7 @@ fn setup_waterpark(
     spawn_block(
         &mut commands, &mut meshes, &table_mat,
         snack_min, snack_max, 0.0, 1.0,
+        false, // low walk-on table
     );
     // Food cuboids on top of table
     let snack_center_x = (snack_min.x + snack_max.x) / 2.0;
@@ -477,6 +470,7 @@ fn spawn_wall(
     ));
     commands.spawn((
         SolidBlock { min, max, y_min: 0.0, y_max: WALL_HEIGHT },
+        CameraOccluder,
         WaterparkEntity,
     ));
 }
@@ -489,6 +483,7 @@ fn spawn_block(
     max: Vec2,
     y_min: f32,
     y_max: f32,
+    camera_occluder: bool,
 ) {
     let w = max.x - min.x;
     let l = max.y - min.y;
@@ -501,149 +496,13 @@ fn spawn_block(
         Transform::from_xyz(cx, (y_min + y_max) / 2.0, cz),
         WaterparkEntity,
     ));
-    commands.spawn((
+    let mut collider = commands.spawn((
         TerrainSurface { min, max, y: y_max },
         SolidBlock { min, max, y_min, y_max },
         WaterparkEntity,
     ));
-}
-
-// --- Terrain collision (swept; mirrors src/level14.rs:429-526 + level13 SolidBlock pushout) ---
-
-fn terrain_collision(
-    surfaces: Query<&TerrainSurface>,
-    solids: Query<&SolidBlock>,
-    mut player_q: Query<(&mut Transform, &mut PlayerPhysics, &mut SquashState), With<Player>>,
-    time: Res<Time>,
-) {
-    let Ok((mut transform, mut physics, mut squash)) = player_q.get_single_mut() else { return };
-    let was_airborne = !physics.grounded;
-    let dt = time.delta_secs();
-
-    // --- Solid block horizontal pushout ---
-    for _iter in 0..3 {
-        let mut pushed = false;
-        for solid in &solids {
-            let px = transform.translation.x;
-            let pz = transform.translation.z;
-            let py = transform.translation.y;
-            if py >= solid.y_max {
-                continue;
-            }
-            let body_top = py + 1.6;
-            let overlap = body_top.min(solid.y_max) - py.max(solid.y_min);
-            if overlap < 0.3 {
-                continue;
-            }
-            let margin = 0.3;
-            if px + margin > solid.min.x && px - margin < solid.max.x
-                && pz + margin > solid.min.y && pz - margin < solid.max.y
-            {
-                let push_left = (px + margin) - solid.min.x;
-                let push_right = solid.max.x - (px - margin);
-                let push_front = (pz + margin) - solid.min.y;
-                let push_back = solid.max.y - (pz - margin);
-                let min_push = push_left.min(push_right).min(push_front).min(push_back);
-                if min_push == push_left {
-                    transform.translation.x = solid.min.x - margin;
-                    physics.velocity.x = physics.velocity.x.min(0.0);
-                } else if min_push == push_right {
-                    transform.translation.x = solid.max.x + margin;
-                    physics.velocity.x = physics.velocity.x.max(0.0);
-                } else if min_push == push_front {
-                    transform.translation.z = solid.min.y - margin;
-                    physics.velocity.z = physics.velocity.z.min(0.0);
-                } else {
-                    transform.translation.z = solid.max.y + margin;
-                    physics.velocity.z = physics.velocity.z.max(0.0);
-                }
-                pushed = true;
-            }
-        }
-        if !pushed { break; }
-    }
-
-    // --- Ceiling collision ---
-    let player_height = 1.8;
-    for solid in &solids {
-        let px = transform.translation.x;
-        let pz = transform.translation.z;
-        let py = transform.translation.y;
-        let margin = 0.3;
-        if px + margin > solid.min.x && px - margin < solid.max.x
-            && pz + margin > solid.min.y && pz - margin < solid.max.y
-            && physics.velocity.y > 0.0
-            && py + player_height > solid.y_min
-            && py < solid.y_min
-        {
-            transform.translation.y = solid.y_min - player_height;
-            physics.velocity.y = 0.0;
-        }
-    }
-
-    // --- Surface snap (swept, per CLAUDE.md) ---
-    let px = transform.translation.x;
-    let pz = transform.translation.z;
-    let prev_x = px - physics.velocity.x * dt;
-    let prev_y = transform.translation.y - physics.velocity.y * dt;
-    let prev_z = pz - physics.velocity.z * dt;
-    let tolerance = if physics.velocity.y <= 0.0 {
-        (physics.velocity.y.abs() * dt + 0.5).min(2.0)
-    } else {
-        0.0
-    };
-
-    let floor_y = -POOL_DEPTH - 0.5;
-    let mut best_y = floor_y;
-    let mut any_surface = floor_y;
-    for surf in &surfaces {
-        let in_now = px >= surf.min.x && px <= surf.max.x && pz >= surf.min.y && pz <= surf.max.y;
-        let in_prev = prev_x >= surf.min.x && prev_x <= surf.max.x
-            && prev_z >= surf.min.y && prev_z <= surf.max.y;
-        if !(in_now || in_prev) { continue; }
-        if in_now && surf.y > any_surface { any_surface = surf.y; }
-        if in_now && surf.y <= transform.translation.y + tolerance && surf.y > best_y {
-            best_y = surf.y;
-        }
-        if physics.velocity.y <= 0.0
-            && prev_y >= surf.y - 0.05
-            && transform.translation.y < surf.y
-            && surf.y > best_y
-        {
-            best_y = surf.y;
-        }
-    }
-    if best_y <= floor_y + 0.1 && any_surface > floor_y + 0.1 && physics.velocity.y <= 0.0 {
-        best_y = any_surface;
-    }
-
-    let crossed = physics.velocity.y <= 0.0 && prev_y >= best_y && transform.translation.y < best_y;
-    let static_grounded_last = !was_airborne && physics.velocity.y.abs() < 0.01;
-    let step_down = static_grounded_last
-        && transform.translation.y > best_y
-        && transform.translation.y - best_y <= 1.5
-        && best_y > floor_y + 0.1;
-    if (transform.translation.y <= best_y + 0.1 || crossed || step_down) && physics.velocity.y <= 0.0 {
-        // For walking off a ledge onto a lower surface, descend smoothly
-        // instead of teleporting — a 1 m stair drop in a single frame is
-        // visually jarring. We still keep the player grounded so they don't
-        // start free-falling. `crossed` (high-speed swept catch) still snaps
-        // immediately to prevent tunneling.
-        const STEP_DOWN_DESCENT: f32 = 14.0;
-        let smooth = step_down && !crossed && transform.translation.y - best_y > 0.05;
-        if smooth {
-            let gap = transform.translation.y - best_y;
-            transform.translation.y -= gap.min(STEP_DOWN_DESCENT * dt);
-        } else {
-            transform.translation.y = best_y;
-        }
-        physics.velocity.y = 0.0;
-        if was_airborne {
-            squash.timer = 0.2;
-        }
-        physics.grounded = true;
-    } else if transform.translation.y > best_y + 0.2 {
-        physics.grounded = false;
+    if camera_occluder {
+        collider.insert(CameraOccluder);
     }
 }
 
@@ -656,27 +515,23 @@ fn terrain_collision(
 const SLIDE_TOP_Y: f32 = 8.0;
 const SLIDE_BOTTOM_Y: f32 = 0.5;
 const SLIDE_TOP_Z: f32 = -14.0;
-const SLIDE_BOTTOM_Z: f32 = -6.5;
+pub(crate) const SLIDE_BOTTOM_Z: f32 = -6.5;
 
 fn water_slide_system(
-    slides: Query<&WaterSlideSegment>,
+    slides: Query<(&WaterSlideSegment, &SlideId)>,
     mut player_q: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
     mut ridden: ResMut<SlidesRidden>,
 ) {
     let Ok((mut transform, mut physics)) = player_q.get_single_mut() else { return };
-    let px = transform.translation.x;
-    let pz = transform.translation.z;
-    let py = transform.translation.y;
-    for seg in &slides {
-        if px >= seg.min.x && px <= seg.max.x && pz >= seg.min.y && pz <= seg.max.y
-            && (py - seg.y).abs() < 1.0
-        {
-            physics.velocity.x = seg.direction.x * 6.0;
-            physics.velocity.z = seg.direction.z * 6.0;
+    for (seg, slide_id) in &slides {
+        if seg.carries(transform.translation) {
+            let pz = transform.translation.z;
+            physics.velocity.x = seg.direction.x * SLIDE_CARRY_SPEED;
+            physics.velocity.z = seg.direction.z * SLIDE_CARRY_SPEED;
             let t = ((pz - SLIDE_TOP_Z) / (SLIDE_BOTTOM_Z - SLIDE_TOP_Z)).clamp(0.0, 1.0);
             transform.translation.y = SLIDE_TOP_Y + (SLIDE_BOTTOM_Y - SLIDE_TOP_Y) * t;
             physics.velocity.y = 0.0;
-            if let Some(slot) = ridden.0.get_mut(seg.color_idx) {
+            if let Some(slot) = ridden.0.get_mut(slide_id.0) {
                 *slot = true;
             }
             break;
@@ -769,5 +624,6 @@ fn cleanup_waterpark(mut commands: Commands, query: Query<Entity, With<Waterpark
         commands.entity(entity).despawn_recursive();
     }
     commands.remove_resource::<GroundYOverride>();
+    commands.remove_resource::<TerrainConfig>();
     commands.remove_resource::<SlidesRidden>();
 }

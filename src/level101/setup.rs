@@ -4,6 +4,9 @@ use crate::player::{
     spawn_player, GroundYOverride, MovementBounds, PowerUpState,
 };
 use crate::shared_ui;
+use crate::terrain::{
+    CameraOccluder, SolidBlock, TerrainConfig, TerrainSurface, WaterSlideSegment,
+};
 use crate::Screen;
 
 use super::components::*;
@@ -21,6 +24,8 @@ pub(super) fn setup_hill(
     commands.insert_resource(ClearColor(Color::srgb(0.45, 0.7, 0.9)));
     commands.insert_resource(HillState::default());
     commands.insert_resource(GroundYOverride(-3.0));
+    // floor_y below any surface (pool floor is at -1.2).
+    commands.insert_resource(TerrainConfig::standard(-2.0));
     commands.insert_resource(PowerUpState::default());
 
     let gray = materials.add(StandardMaterial {
@@ -150,6 +155,7 @@ pub(super) fn setup_hill(
             commands.spawn((
                 TerrainSurface { min: Vec2::new(-half, -half), max: Vec2::new(-tunnel_half_w, half), y: y_top },
                 SolidBlock { min: Vec2::new(-half, -half), max: Vec2::new(-tunnel_half_w, half), y_min: y_bot, y_max: y_top },
+                CameraOccluder,
                 HillEntity,
             ));
             // Right half
@@ -163,6 +169,7 @@ pub(super) fn setup_hill(
             commands.spawn((
                 TerrainSurface { min: Vec2::new(tunnel_half_w, -half), max: Vec2::new(half, half), y: y_top },
                 SolidBlock { min: Vec2::new(tunnel_half_w, -half), max: Vec2::new(half, half), y_min: y_bot, y_max: y_top },
+                CameraOccluder,
                 HillEntity,
             ));
         } else {
@@ -175,6 +182,7 @@ pub(super) fn setup_hill(
             commands.spawn((
                 TerrainSurface { min: Vec2::new(-half, -half), max: Vec2::new(half, half), y: y_top },
                 SolidBlock { min: Vec2::new(-half, -half), max: Vec2::new(half, half), y_min: y_bot, y_max: y_top },
+                CameraOccluder,
                 HillEntity,
             ));
         }
@@ -298,6 +306,7 @@ pub(super) fn setup_hill(
                 min: Vec2::new(slide_x - 0.6, -1.5),
                 max: Vec2::new(slide_x + 0.6, 1.5),
                 y: y_top,
+                direction: Vec3::NEG_X, // toward the pool
             },
             HillEntity,
         ));
@@ -569,6 +578,7 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
+        CameraOccluder,
         HillEntity,
     ));
     // West shore (x = pool_x_min)
@@ -579,6 +589,7 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
+        CameraOccluder,
         HillEntity,
     ));
     // North shore (z = pool_z_min)
@@ -589,6 +600,7 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
+        CameraOccluder,
         HillEntity,
     ));
     // South shore (z = pool_z_max)
@@ -599,6 +611,7 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
+        CameraOccluder,
         HillEntity,
     ));
     // Water surface (translucent)
@@ -1079,6 +1092,19 @@ pub(super) fn setup_hill(
     });
 }
 
+/// Sets [`HillPhase::Victory`] when the player stands at the summit flag.
+pub(super) fn summit_victory_check(
+    player_q: Query<&Transform, With<crate::player::Player>>,
+    mut next_phase: ResMut<NextState<crate::HillPhase>>,
+    mut scoreboard: ResMut<crate::Scoreboard>,
+) {
+    let Ok(tf) = player_q.get_single() else { return };
+    if super::debugger::check_summit_reached(tf.translation) {
+        scoreboard.set_solved(101);
+        next_phase.set(crate::HillPhase::Victory);
+    }
+}
+
 pub(super) fn handle_victory(
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -1110,6 +1136,7 @@ pub(super) fn cleanup_hill(
     }
     commands.remove_resource::<HillState>();
     commands.remove_resource::<GroundYOverride>();
+    commands.remove_resource::<crate::terrain::TerrainConfig>();
     commands.remove_resource::<ActivePowerUps>();
     commands.remove_resource::<PowerUpState>();
     commands.remove_resource::<AppleAssets>();

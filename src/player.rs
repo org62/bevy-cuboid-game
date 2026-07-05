@@ -428,7 +428,7 @@ pub fn toggle_pause(
 
 pub fn animate_player(
     time: Res<Time>,
-    mut player_query: Query<(&Transform, &PlayerPhysics, &mut SquashState, &Children), With<Player>>,
+    mut player_query: Query<(&PlayerPhysics, &mut SquashState, &Children), With<Player>>,
     mut body_query: Query<
         &mut Transform,
         (With<PlayerBody>, Without<PlayerHead>, Without<Player>),
@@ -437,26 +437,13 @@ pub fn animate_player(
         &mut Transform,
         (With<PlayerHead>, Without<PlayerBody>, Without<Player>),
     >,
-    mut smoothed_y: Local<Option<f32>>,
 ) {
-    let Ok((player_tf, physics, mut squash, children)) = player_query.get_single_mut() else {
+    let Ok((physics, mut squash, children)) = player_query.get_single_mut() else {
         return;
     };
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
     let horiz_speed = Vec2::new(physics.velocity.x, physics.velocity.z).length();
-
-    // Visual Y smoothing: body/head trail physics on stair snaps
-    let py = player_tf.translation.y;
-    let sy = *smoothed_y.get_or_insert(py);
-    let new_sy = if (sy - py).abs() > 10.0 {
-        py
-    } else {
-        let rate = if physics.grounded { 5.0 } else { 20.0 };
-        sy + (py - sy) * (rate * dt).min(1.0)
-    };
-    *smoothed_y = Some(new_sy);
-    let visual_y_offset = new_sy - py;
 
     // Idle bob
     let bob = if horiz_speed < 0.5 && physics.grounded {
@@ -476,11 +463,11 @@ pub fn animate_player(
 
     for &child in children.iter() {
         if let Ok(mut t) = body_query.get_mut(child) {
-            t.translation.y = 0.4 + bob + visual_y_offset;
+            t.translation.y = 0.4 + bob;
             t.scale = Vec3::new(xz_scale, y_scale, xz_scale);
         }
         if let Ok(mut t) = head_query.get_mut(child) {
-            t.translation.y = 1.1 + bob + visual_y_offset;
+            t.translation.y = 1.1 + bob;
             t.scale = Vec3::new(xz_scale, y_scale, xz_scale);
         }
     }
