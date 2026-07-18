@@ -1290,52 +1290,57 @@ pub fn diag_hotkeys(
     }
 }
 
-/// Collects real frame times and refreshes the overlay four times a second.
-/// Reports average FPS, the worst frame in the window, and how many frames
-/// deviated >50% from the window median (pacing spikes) — flat frame times
-/// with visible stutter point at motion/camera code, spiky ones at hitches.
-pub fn diag_overlay_update(
-    real_time: Res<Time<Real>>,
-    diag: Res<DiagState>,
-    mut history: Local<Vec<f32>>,
-    mut refresh: Local<f32>,
-    mut text_q: Query<&mut Text, With<DiagOverlayText>>,
-) {
-    if !diag.overlay {
-        history.clear();
-        *refresh = 0.0;
-        return;
-    }
-    let dt = real_time.delta_secs();
-    if dt > 0.0 {
-        history.push(dt);
-        if history.len() > 240 {
-            let excess = history.len() - 240;
-            history.drain(..excess);
-        }
-    }
-    *refresh -= dt;
-    if *refresh > 0.0 || history.len() < 10 {
-        return;
-    }
-    *refresh = 0.25;
-
-    let mut sorted = history.clone();
+/// Summary stats over a frame-time window: average, worst, and how many
+/// frames deviated >50% from the window median (pacing spikes).
+fn frame_stats(history: &[f32]) -> (f32, f32, usize) {
+    let mut sorted = history.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median = sorted[sorted.len() / 2];
     let avg = history.iter().sum::<f32>() / history.len() as f32;
     let worst = *sorted.last().unwrap();
     let spikes = history.iter().filter(|&&d| d > median * 1.5).count();
+    (avg, worst, spikes)
+}
+
+/// Refreshes the overlay four times a second from [`FramePacing`]'s rolling
+/// windows. `raw` is the measured frame loop time; `sim` is the delta the
+/// game actually integrates with after smoothing — visible stutter with a
+/// flat `sim` line points away from time-stepping, spiky `raw` with flat
+/// `sim` means the smoother is absorbing pacing jitter as designed.
+pub fn diag_overlay_update(
+    real_time: Res<Time<Real>>,
+    diag: Res<DiagState>,
+    pacing: Res<crate::frame_pacing::FramePacing>,
+    mut refresh: Local<f32>,
+    mut text_q: Query<&mut Text, With<DiagOverlayText>>,
+) {
+    if !diag.overlay {
+        *refresh = 0.0;
+        return;
+    }
+    *refresh -= real_time.delta_secs();
+    if *refresh > 0.0 || pacing.raw_history.len() < 10 || pacing.used_history.len() < 10 {
+        return;
+    }
+    *refresh = 0.25;
+
+    let (raw_avg, raw_worst, raw_spikes) = frame_stats(&pacing.raw_history);
+    let (sim_avg, sim_worst, sim_spikes) = frame_stats(&pacing.used_history);
 
     if let Ok(mut text) = text_q.get_single_mut() {
         let s = format!(
-            "fps {:>5.1}  frame avg {:>5.2}ms  worst {:>6.2}ms\nspikes(>1.5x median) {:>3}/{}  cam: {}",
-            1.0 / avg,
-            avg * 1000.0,
-            worst * 1000.0,
-            spikes,
-            history.len(),
+            "fps {:>5.1}  refresh est {:>5.2}ms  cam: {}\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}",
+            1.0 / raw_avg,
+            pacing.interval * 1000.0,
             diag.cam_mode.label(),
+            raw_avg * 1000.0,
+            raw_worst * 1000.0,
+            raw_spikes,
+            pacing.raw_history.len(),
+            sim_avg * 1000.0,
+            sim_worst * 1000.0,
+            sim_spikes,
+            pacing.used_history.len(),
         );
         if **text != s {
             **text = s;

@@ -1,3 +1,4 @@
+pub mod frame_pacing;
 mod level1;
 mod level2;
 mod level3;
@@ -255,6 +256,7 @@ fn main() {
         .init_resource::<shared_ui::ActiveInput>()
         .init_resource::<shared_ui::MouseSettings>()
         .init_resource::<shared_ui::DiagState>()
+        .add_plugins(frame_pacing::FramePacingPlugin)
         .add_systems(OnEnter(Screen::Menu), reset_pause)
         .add_systems(
             Update,
