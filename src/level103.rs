@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+﻿use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GroundYOverride,
@@ -195,7 +195,7 @@ fn setup_waterpark(
 
     // --- Pool exit stairs (south-center, NOT the corner). Placing them in the
     //      SE corner caused an oscillating pushout between the stairs' east
-    //      edge, the pool east wall, and the pool south wall — the player got
+    //      edge, the pool east wall, and the pool south wall â€” the player got
     //      stuck. Inset from both side walls keeps the geometry conflict-free. ---
     let stair_step_h = 0.4_f32;
     let stair_step_count = 5;
@@ -232,7 +232,7 @@ fn setup_waterpark(
         Vec2::new(ROOM_X, -ROOM_Z), Vec2::new(ROOM_X + 0.5, ROOM_Z),
     );
 
-    // (Ceiling intentionally omitted — the camera looks down from y=22, so any
+    // (Ceiling intentionally omitted â€” the camera looks down from y=22, so any
     // ceiling mesh would block the view.)
     let _ = ceiling_mat;
 
@@ -273,7 +273,7 @@ fn setup_waterpark(
         (Color::srgb(0.25, 0.55, 0.95), "blue"),
         (Color::srgb(0.7, 0.35, 0.85), "purple"),
     ];
-    // Slide centers must stay inside the pool x-range (±7) minus half the slide
+    // Slide centers must stay inside the pool x-range (Â±7) minus half the slide
     // width (0.7) so the rider lands in the water and not on the deck floor.
     let slide_x_centers = [-6.0, -3.0, 0.0, 3.0, 6.0];
     let slide_segments = 10;
@@ -300,7 +300,7 @@ fn setup_waterpark(
             ));
             let min = Vec2::new(cx - slide_w / 2.0, z_min);
             let max = Vec2::new(cx + slide_w / 2.0, z_max);
-            // Ride-on geometry: deliberately NOT a CameraOccluder — the camera
+            // Ride-on geometry: deliberately NOT a CameraOccluder â€” the camera
             // trails directly over the slide while the player rides it.
             commands.spawn((
                 TerrainSurface { min, max, y: y_top },
@@ -384,7 +384,7 @@ fn setup_waterpark(
         .looking_at(PLAYER_SPAWN, Vec3::Y),
         shared_ui::FollowCamera {
             offset: CAM_OFFSET,
-            lerp_speed: 10.0,
+            
             look_offset: Vec3::ZERO,
         },
         WaterparkEntity,
@@ -511,7 +511,7 @@ fn spawn_block(
 // overridden every frame with the slide's continuous slope (so the descent is
 // one smooth ramp rather than 10 micro-teleports between segment surfaces).
 
-// Slide endpoints — all 5 slides share the same z range and slope.
+// Slide endpoints â€” all 5 slides share the same z range and slope.
 const SLIDE_TOP_Y: f32 = 8.0;
 const SLIDE_BOTTOM_Y: f32 = 0.5;
 const SLIDE_TOP_Z: f32 = -14.0;

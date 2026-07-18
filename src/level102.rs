@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+﻿use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GroundYOverride,
@@ -199,7 +199,7 @@ fn random_features(rng: &mut u64) -> (Vec<TerrainFeature>, Vec2) {
     let main_cz = rng_range(rng, -22.0, 22.0);
     let toward_spawn = (Vec2::new(PLAYER_SPAWN.x, PLAYER_SPAWN.z) - Vec2::new(main_cx, main_cz))
         .normalize_or_zero();
-    let jitter = rng_range(rng, -0.52, 0.52); // ±30°
+    let jitter = rng_range(rng, -0.52, 0.52); // Â±30Â°
     let main_dir = rotate(toward_spawn, jitter);
     feats.push(TerrainFeature {
         cx: main_cx,
@@ -285,7 +285,7 @@ fn find_peak(feats: &[TerrainFeature]) -> (f32, f32, f32) {
 
 /// Top-anchored slab geometry. Cells render at most COLUMN_THICKNESS thick,
 /// anchored at their top. The tail clamp keeps a 0.2 visible thickness when
-/// the column would otherwise collapse — matching CLAUDE.md's rule that
+/// the column would otherwise collapse â€” matching CLAUDE.md's rule that
 /// `TerrainSurface.y` and the visible mesh top must come from the same value.
 /// Void cells (target_h <= VOID_HR + 1.0) render at their target_h with a
 /// 0.2 thickness, deep below the underground floor where they're occluded.
@@ -493,7 +493,7 @@ fn setup_meadow(
         MeadowEntity,
     ));
 
-    // Cyan beacon over the deep pit — visible from underground so the player
+    // Cyan beacon over the deep pit â€” visible from underground so the player
     // knows where to head to climb out.
     let beacon_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.0, 0.9, 1.0),
@@ -595,7 +595,7 @@ fn setup_meadow(
         Camera3d::default(),
         Transform::from_xyz(PLAYER_SPAWN.x + CAM_OFFSET.x, PLAYER_SPAWN.y + CAM_OFFSET.y, PLAYER_SPAWN.z + CAM_OFFSET.z)
             .looking_at(PLAYER_SPAWN, Vec3::Y),
-        shared_ui::FollowCamera { offset: CAM_OFFSET, lerp_speed: 10.0, look_offset: Vec3::ZERO },
+        shared_ui::FollowCamera { offset: CAM_OFFSET, look_offset: Vec3::ZERO },
         MeadowEntity,
     ));
 
@@ -610,7 +610,7 @@ fn setup_meadow(
             TextFont { font_size: 26.0, ..default() }, TextColor(Color::WHITE), MeadowEntity,
         ));
         p.spawn((
-            Text::new("Round 1 — Reach the flag!"),
+            Text::new("Round 1 â€” Reach the flag!"),
             TextFont { font_size: 18.0, ..default() },
             TextColor(Color::srgb(0.9, 0.9, 0.5)), RoundText, MeadowEntity,
         ));
@@ -695,7 +695,7 @@ fn terrain_transition_system(
             })
         };
 
-        // Set new targets per cell — pit holes get the void sentinel so the
+        // Set new targets per cell â€” pit holes get the void sentinel so the
         // morph drops them below the underground floor where they vanish.
         for (_, _, mut cell, _) in &mut cells {
             let gx = ((cell.cx + AREA_HALF - CELL / 2.0) / CELL).round() as i32;
@@ -745,7 +745,7 @@ fn terrain_transition_system(
 
         // Update round text
         if let Ok(mut text) = round_text.get_single_mut() {
-            *text = Text::new(format!("Round {} — Reach the flag!", state.round));
+            *text = Text::new(format!("Round {} â€” Reach the flag!", state.round));
         }
     }
 

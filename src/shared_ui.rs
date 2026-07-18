@@ -2,7 +2,7 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
-use crate::player::{Player, PlayerPhysics};
+use crate::player::Player;
 
 // --- Shared components ---
 
@@ -31,7 +31,6 @@ pub struct OverlayScreen;
 #[derive(Component)]
 pub struct FollowCamera {
     pub offset: Vec3,
-    pub lerp_speed: f32,
     pub look_offset: Vec3,
 }
 
@@ -961,50 +960,39 @@ const MIN_CAMERA_DISTANCE: f32 = 0.6;
 const OCCLUSION_RECOVER_RATE: f32 = 4.0;
 
 pub fn follow_camera_system(
-    player_q: Query<(&Transform, &PlayerPhysics), (With<Player>, Without<FollowCamera>)>,
+    player_q: Query<&Transform, (With<Player>, Without<FollowCamera>)>,
     mut cam_q: Query<(&mut Transform, &FollowCamera), Without<Player>>,
     occluders: Query<
         &crate::terrain::SolidBlock,
         With<crate::terrain::CameraOccluder>,
     >,
     orbit: Res<CameraOrbit>,
-    diag: Option<Res<DiagState>>,
-    mut smoothed: Local<Option<Vec3>>,
+    mut prev_p: Local<Option<Vec3>>,
     mut occ_frac: Local<Option<f32>>,
     time: Res<Time>,
 ) {
-    let Ok((player_tf, physics)) = player_q.get_single() else { return };
+    let Ok(player_tf) = player_q.get_single() else { return };
     let Ok((mut cam_tf, follow)) = cam_q.get_single_mut() else { return };
-    let cam_mode = diag.map(|d| d.cam_mode).unwrap_or_default();
     let dt = time.delta_secs();
     let p = player_tf.translation;
-    let s = *smoothed.get_or_insert(p);
-    let new_s = if cam_mode == CamDiagMode::Rigid || s.distance_squared(p) > 100.0 {
+    // The camera is rigidly anchored to the player — no follow smoothing.
+    // Positional smoothing layers re-integrate frame-time jitter and read as
+    // judder; the frame_pacing module is the one place time is smoothed.
+    if prev_p.map_or(false, |s| s.distance_squared(p) > 100.0) {
         *occ_frac = None; // teleport: don't carry over a pulled-in distance
-        p
-    } else {
-        let txz = (15.0 * dt).min(1.0);
-        let ty_rate = if physics.grounded { 5.0 } else { 20.0 };
-        let ty = (ty_rate * dt).min(1.0);
-        Vec3::new(
-            s.x + (p.x - s.x) * txz,
-            s.y + (p.y - s.y) * ty,
-            s.z + (p.z - s.z) * txz,
-        )
-    };
-    *smoothed = Some(new_s);
+    }
+    *prev_p = Some(p);
 
     // Apply the orbit rotation directly (no position lerp) so mouse-look is
-    // responsive. Follow smoothing already happens on `new_s` above; lerping
-    // the translation too would double-smooth and add rotation input lag.
+    // responsive.
     let rot = Quat::from_rotation_y(orbit.yaw) * Quat::from_rotation_x(orbit.pitch);
-    let target = new_s + rot * (follow.offset * orbit.zoom);
+    let target = p + rot * (follow.offset * orbit.zoom);
 
     // Occlusion: cast from the player's torso toward the desired camera spot
     // and clamp to the nearest tagged wall, so the camera dollies in front of
     // geometry instead of clipping inside it. Levels without CameraOccluder
     // entities skip the loop entirely.
-    let ray_origin = new_s + follow.look_offset + Vec3::Y * OCCLUSION_ORIGIN_LIFT;
+    let ray_origin = p + follow.look_offset + Vec3::Y * OCCLUSION_ORIGIN_LIFT;
     let to_cam = target - ray_origin;
     let full = to_cam.length();
     let desired = if full > 1e-4 {
@@ -1037,15 +1025,8 @@ pub fn follow_camera_system(
     } else {
         target
     };
-    // A/B diagnostic: `ExtraSmooth` restores the pre-July camera position lerp
-    // on top of the follow smoothing (`FollowCamera::lerp_speed`).
-    cam_tf.translation = if cam_mode == CamDiagMode::ExtraSmooth {
-        let t = (follow.lerp_speed * dt).min(1.0);
-        cam_tf.translation.lerp(desired, t)
-    } else {
-        desired
-    };
-    cam_tf.look_at(new_s + follow.look_offset, Vec3::Y);
+    cam_tf.translation = desired;
+    cam_tf.look_at(p + follow.look_offset, Vec3::Y);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1211,41 +1192,18 @@ pub fn manage_cursor_grab(
     }
 }
 
-// --- Diagnostics (F3 overlay, F4/F5 camera A/B modes) ---
-
-/// Camera behavior under test. `Default` is the current shipping behavior,
-/// `Rigid` disables all follow smoothing (camera glued to its target), and
-/// `ExtraSmooth` re-adds the pre-July camera position lerp on top.
-#[derive(Default, Clone, Copy, PartialEq)]
-pub enum CamDiagMode {
-    #[default]
-    Default,
-    Rigid,
-    ExtraSmooth,
-}
-
-impl CamDiagMode {
-    fn label(self) -> &'static str {
-        match self {
-            CamDiagMode::Default => "default",
-            CamDiagMode::Rigid => "rigid (F4)",
-            CamDiagMode::ExtraSmooth => "extra-smooth (F5)",
-        }
-    }
-}
+// --- Diagnostics (F3 frame-pacing overlay) ---
 
 /// Runtime diagnostics state, toggled by hotkeys from any screen.
 #[derive(Resource, Default)]
 pub struct DiagState {
     pub overlay: bool,
-    pub cam_mode: CamDiagMode,
 }
 
 #[derive(Component)]
 pub struct DiagOverlayText;
 
-/// F3 toggles the frame-time overlay; F4/F5 toggle the camera A/B modes
-/// (pressing the active mode's key again returns to the default camera).
+/// F3 toggles the frame-time overlay.
 pub fn diag_hotkeys(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut diag: ResMut<DiagState>,
@@ -1273,20 +1231,6 @@ pub fn diag_hotkeys(
                 commands.entity(e).despawn_recursive();
             }
         }
-    }
-    if keyboard.just_pressed(KeyCode::F4) {
-        diag.cam_mode = if diag.cam_mode == CamDiagMode::Rigid {
-            CamDiagMode::Default
-        } else {
-            CamDiagMode::Rigid
-        };
-    }
-    if keyboard.just_pressed(KeyCode::F5) {
-        diag.cam_mode = if diag.cam_mode == CamDiagMode::ExtraSmooth {
-            CamDiagMode::Default
-        } else {
-            CamDiagMode::ExtraSmooth
-        };
     }
 }
 
@@ -1329,11 +1273,10 @@ pub fn diag_overlay_update(
 
     if let Ok(mut text) = text_q.get_single_mut() {
         let s = format!(
-            "fps {:>5.1}  refresh est {:>5.2}ms  drift {:>+5.1}ms  cam: {}\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}",
+            "fps {:>5.1}  refresh est {:>5.2}ms  drift {:>+5.1}ms\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}",
             1.0 / raw_avg,
             pacing.interval * 1000.0,
             pacing.drift_ms(),
-            diag.cam_mode.label(),
             raw_avg * 1000.0,
             raw_worst * 1000.0,
             raw_spikes,

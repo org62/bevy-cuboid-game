@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+﻿use bevy::prelude::*;
 
 use crate::player::{
     animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
@@ -137,7 +137,7 @@ fn setup_world(
         Transform::from_xyz(0.0, 8.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
         shared_ui::FollowCamera {
             offset: Vec3::new(0.0, 8.0, 8.0),
-            lerp_speed: 8.0,
+            
             look_offset: Vec3::Y,
         },
         WorldEntity,

@@ -1,4 +1,4 @@
-use bevy::input::keyboard::KeyboardInput;
+﻿use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
 use crate::player::{
@@ -257,7 +257,7 @@ fn setup_maze(
         },
         shared_ui::FollowCamera {
             offset: Vec3::new(0.0, 12.0, 12.0),
-            lerp_speed: 6.0,
+            
             look_offset: Vec3::Y,
         },
         MazeEntity,
@@ -299,7 +299,7 @@ fn maze_playing_update(
         return;
     };
 
-    // Apply invisible wall collision — push player out by minimum penetration.
+    // Apply invisible wall collision â€” push player out by minimum penetration.
     // Walls only block up to WALL_HEIGHT: lift the player's Y above the wall
     // top and they pass straight over (the intended debugger solution).
     let walls = wall_rects();
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn trophy_not_collected_while_hovering_above() {
         // Flying over the walls at a high Y and hovering above the trophy's XZ
-        // must NOT collect it — the player has to descend onto it.
+        // must NOT collect it â€” the player has to descend onto it.
         let hovering = Vec3::new(TROPHY_POS.x, 5.0, TROPHY_POS.z);
         assert!(!check_trophy_collected(hovering, TROPHY_POS));
 

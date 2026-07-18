@@ -1,4 +1,4 @@
-use bevy::input::keyboard::KeyboardInput;
+﻿use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
 use crate::player::{
@@ -129,7 +129,7 @@ const START_HP: f32 = 10.0;
 const DAMAGE_PER_HIT: f32 = 1.0;
 const HEAL_AMOUNT: f32 = 1.0;
 // Healing from items caps here (one below the win threshold), so the goal is
-// unreachable through normal play — it needs the debugger.
+// unreachable through normal play â€” it needs the debugger.
 const MAX_HEAL_HP: f32 = 99.0;
 const WIN_HP: f32 = 100.0;
 const PLAYER_SPAWN: Vec3 = Vec3::new(0.0, 0.0, 4.0);
@@ -245,7 +245,7 @@ fn setup_cannon_arena(
         Transform::from_xyz(0.0, 8.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         shared_ui::FollowCamera {
             offset: Vec3::new(0.0, 8.0, 10.0),
-            lerp_speed: 8.0,
+            
             look_offset: Vec3::Y,
         },
         CannonEntity,

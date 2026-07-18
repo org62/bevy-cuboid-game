@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+﻿use bevy::prelude::*;
 
 use crate::player::{
     spawn_player, GroundYOverride, MovementBounds, PowerUpState,
@@ -79,7 +79,7 @@ pub(super) fn setup_hill(
         ..default()
     });
 
-    // Ground plane 60x60 — split to leave hole for pool at (-18, 0) size 8x6
+    // Ground plane 60x60 â€” split to leave hole for pool at (-18, 0) size 8x6
     // Pool spans x=-22..-14, z=-3..3
     // Right section: x=-14 to 30 (width 44)
     commands.spawn((
@@ -429,7 +429,7 @@ pub(super) fn setup_hill(
     // --- Maze (east side, ground level) ---
     let mut maze_rng = AppleRng::new();
 
-    // All maze walls (boundary + interior + corner posts) — spawned as one grid system
+    // All maze walls (boundary + interior + corner posts) â€” spawned as one grid system
     maze::spawn_maze_interior(&mut commands, &mut meshes, &mut materials, &mut maze_rng);
 
     // --- Teleporter pad (gold glowing platform) ---
@@ -542,7 +542,7 @@ pub(super) fn setup_hill(
             ));
         });
 
-    // Sunken pool (left of hill) — player falls in and must jump out
+    // Sunken pool (left of hill) â€” player falls in and must jump out
     let pool_depth = 1.0_f32;
     let pool_x = -18.0_f32;
     let pool_z = 0.0_f32;
@@ -567,7 +567,7 @@ pub(super) fn setup_hill(
         },
         HillEntity,
     ));
-    // Pool shore walls — solid blocks so player bumps into edges and must jump out
+    // Pool shore walls â€” solid blocks so player bumps into edges and must jump out
     // These are the ground edges around the pool, acting as walls from the pool side.
     // NOT CameraOccluders: they sit entirely at/below ground level under the
     // walkable shore, so tagging them only causes spurious camera pull-ins
@@ -695,7 +695,7 @@ pub(super) fn setup_hill(
             PLAYER_SPAWN.z + CAM_OFFSET.z,
         )
         .looking_at(PLAYER_SPAWN, Vec3::Y),
-        shared_ui::FollowCamera { offset: CAM_OFFSET, lerp_speed: 12.0, look_offset: Vec3::ZERO },
+        shared_ui::FollowCamera { offset: CAM_OFFSET, look_offset: Vec3::ZERO },
         HillEntity,
     ));
 
@@ -794,7 +794,7 @@ pub(super) fn setup_hill(
     commands.insert_resource(apple_rng);
     commands.insert_resource(ColorCubeState::default());
 
-    // --- Race track (snake-like with 90° turns, pool bridge, checkpoints) ---
+    // --- Race track (snake-like with 90Â° turns, pool bridge, checkpoints) ---
     let track_dark_gray = materials.add(StandardMaterial {
         base_color: Color::srgb(0.25, 0.25, 0.25),
         ..default()
@@ -824,7 +824,7 @@ pub(super) fn setup_hill(
         ));
     }
 
-    // Corner fills at each waypoint (square patches to fill 90° turn gaps)
+    // Corner fills at each waypoint (square patches to fill 90Â° turn gaps)
     let corner_mesh = meshes.add(Cuboid::new(TRACK_WIDTH, 0.04, TRACK_WIDTH));
     for wp in &RACE_WAYPOINTS {
         commands.spawn((
@@ -857,7 +857,7 @@ pub(super) fn setup_hill(
     });
 
     // Checkpoint markers: two pillars per checkpoint (player = left, bot = right)
-    // Offset 2 units back along the incoming segment so they sit before the 90° turn.
+    // Offset 2 units back along the incoming segment so they sit before the 90Â° turn.
     let pillar_mesh = meshes.add(Cuboid::new(0.3, 1.0, 0.3));
     let cp_pull_back = 2.0_f32; // distance before the turn
     for (i, &cp_idx) in RACE_CHECKPOINT_INDICES.iter().enumerate() {
@@ -896,7 +896,7 @@ pub(super) fn setup_hill(
         HillEntity,
     ));
 
-    // --- Finish area: checkerboard 6 meters before start on the closing segment (x=25, z≈22) ---
+    // --- Finish area: checkerboard 6 meters before start on the closing segment (x=25, zâ‰ˆ22) ---
     {
         let checker_black = materials.add(StandardMaterial {
             base_color: Color::srgb(0.15, 0.15, 0.15),
