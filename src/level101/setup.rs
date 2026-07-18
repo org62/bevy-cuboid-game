@@ -569,6 +569,9 @@ pub(super) fn setup_hill(
     ));
     // Pool shore walls — solid blocks so player bumps into edges and must jump out
     // These are the ground edges around the pool, acting as walls from the pool side.
+    // NOT CameraOccluders: they sit entirely at/below ground level under the
+    // walkable shore, so tagging them only causes spurious camera pull-ins
+    // when the sightline grazes the shore (CLAUDE.md: don't tag walk-on geometry).
     let wall_thick = 0.5;
     // East shore (x = pool_x_max)
     commands.spawn((
@@ -578,7 +581,6 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
-        CameraOccluder,
         HillEntity,
     ));
     // West shore (x = pool_x_min)
@@ -589,7 +591,6 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
-        CameraOccluder,
         HillEntity,
     ));
     // North shore (z = pool_z_min)
@@ -600,7 +601,6 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
-        CameraOccluder,
         HillEntity,
     ));
     // South shore (z = pool_z_max)
@@ -611,7 +611,6 @@ pub(super) fn setup_hill(
             y_min: -pool_depth,
             y_max: 0.0,
         },
-        CameraOccluder,
         HillEntity,
     ));
     // Water surface (translucent)

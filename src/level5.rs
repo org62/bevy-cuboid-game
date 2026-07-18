@@ -8,6 +8,18 @@ use crate::player::{
 use crate::shared_ui;
 use crate::{GamePaused, RacePhase, Screen, Scoreboard};
 
+const RACE_TUTORIAL: &str = "\
+You cannot out-drive the field head-on - the AI racers are faster than your top speed. But the race only cares about how far each racer is down the track, and every one of those numbers lives in memory you can reach. There are several independent ways to win; any one of them is enough.
+
+Strategy 1 - Teleport yourself to the finish (change your position):
+Find your progress in memory -> see what writes to it -> find your coordinates -> modify Z to teleport closer to the finish.
+
+Strategy 2 - Attack the win check (track the code that reads your progress):
+The finish check reads your progress and returns true only at >= 0.995. Force the branch to always report finished, or lower the 0.995 threshold - so you win from anywhere on the track.
+
+Strategy 3 - Freeze the other racers (NOP what writes their progress):
+Every frame one shared function advances all the AI down the track and updates the % you see in the STANDINGS HUD. Right-click an AI's progress value in the HUD-backed memory and 'Find what writes' to it - all three AI share the same write. NOP that write (or NOP the call to it) and the whole field stops at 0%, leaving you to drive across at your own pace.";
+
 pub struct Level5Plugin;
 
 impl Plugin for Level5Plugin {
@@ -29,7 +41,7 @@ impl Plugin for Level5Plugin {
             )
             .add_systems(
                 Update,
-                (animate_player, race_visual_update, shared_ui::dismiss_hint)
+                (animate_player, race_visual_update, shared_ui::hint_tutorial_controls)
                     .after(PlayerMovementSet)
                     .run_if(in_state(Screen::RaceChallenge)),
             )
@@ -397,12 +409,18 @@ fn setup_race(
             ));
         });
 
-    // Hint
+    // Hint box + tutorial modal (hidden; H reveals the hint, T the tutorial)
     if !scoreboard.is_solved(5) {
-        shared_ui::spawn_hint_box(
+        shared_ui::spawn_hint_box_with_tutorial(
             &mut commands,
-            "You can't out-drive the AI head-on. But your finish is judged only by how far you are down the track. Find the coordinate that changes as you drive (like the maze's height trick) and move yourself to the finish line -- or find the value that drives the AI and weaken it.",
+            "Use multiple strategies to win: teleport yourself to the finish, patch the finish criteria, or freeze the other racers.",
             300.0,
+            RaceEntity,
+        );
+        shared_ui::spawn_hint_modal(
+            &mut commands,
+            "Win the Race - Full Solution",
+            RACE_TUTORIAL,
             RaceEntity,
         );
     }
@@ -593,12 +611,19 @@ fn race_visual_update(
     rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
     // Fill each HUD slot with the racer at that standing, in their own color.
+    // Only write on actual change: an unconditional write re-layouts every
+    // text row every frame (Bevy change detection triggers on mutable deref).
     for (mut text, mut color, slot) in &mut row_q {
         if let Some((label, c, progress, _pos)) = rows.get(slot.0) {
             let pct = (progress * 100.0).min(100.0);
-            **text = format!("{}. {}  {:.0}%", slot.0 + 1, label, pct);
-            color.0 = *c;
-        } else {
+            let row = format!("{}. {}  {:.0}%", slot.0 + 1, label, pct);
+            if **text != row {
+                **text = row;
+            }
+            if color.0 != *c {
+                color.0 = *c;
+            }
+        } else if !text.is_empty() {
             **text = String::new();
         }
     }

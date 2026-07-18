@@ -968,17 +968,19 @@ pub fn follow_camera_system(
         With<crate::terrain::CameraOccluder>,
     >,
     orbit: Res<CameraOrbit>,
+    diag: Option<Res<DiagState>>,
     mut smoothed: Local<Option<Vec3>>,
-    mut occ_dist: Local<Option<f32>>,
+    mut occ_frac: Local<Option<f32>>,
     time: Res<Time>,
 ) {
     let Ok((player_tf, physics)) = player_q.get_single() else { return };
     let Ok((mut cam_tf, follow)) = cam_q.get_single_mut() else { return };
+    let cam_mode = diag.map(|d| d.cam_mode).unwrap_or_default();
     let dt = time.delta_secs();
     let p = player_tf.translation;
     let s = *smoothed.get_or_insert(p);
-    let new_s = if s.distance_squared(p) > 100.0 {
-        *occ_dist = None; // teleport: don't carry over a pulled-in distance
+    let new_s = if cam_mode == CamDiagMode::Rigid || s.distance_squared(p) > 100.0 {
+        *occ_frac = None; // teleport: don't carry over a pulled-in distance
         p
     } else {
         let txz = (15.0 * dt).min(1.0);
@@ -1005,7 +1007,7 @@ pub fn follow_camera_system(
     let ray_origin = new_s + follow.look_offset + Vec3::Y * OCCLUSION_ORIGIN_LIFT;
     let to_cam = target - ray_origin;
     let full = to_cam.length();
-    if full > 1e-4 {
+    let desired = if full > 1e-4 {
         let dir = to_cam / full;
         let mut allowed = full;
         for block in &occluders {
@@ -1016,17 +1018,33 @@ pub fn follow_camera_system(
             }
         }
         allowed = allowed.max(MIN_CAMERA_DISTANCE);
-        let cur = occ_dist.get_or_insert(full);
-        if allowed < *cur {
-            *cur = allowed; // pull in instantly
+        // Track occlusion as a FRACTION of the desired distance, not an
+        // absolute distance: zoom/pitch changes of the unoccluded camera then
+        // apply instantly instead of lagging behind the recovery ease (an
+        // absolute-distance ease made every zoom-out crawl at 4 u/s, which
+        // read as a choppy/sticky camera on every level).
+        let target_frac = (allowed / full).min(1.0);
+        let f = occ_frac.get_or_insert(1.0);
+        if target_frac < *f {
+            *f = target_frac; // pull in instantly — never spend a frame in a wall
         } else {
-            *cur += (allowed - *cur) * (OCCLUSION_RECOVER_RATE * dt).min(1.0);
+            *f += (target_frac - *f) * (OCCLUSION_RECOVER_RATE * dt).min(1.0);
+            if target_frac - *f < 0.01 {
+                *f = target_frac; // settle so unoccluded frames don't keep easing
+            }
         }
-        *cur = cur.min(full); // zooming/orbiting closer is never blocked
-        cam_tf.translation = ray_origin + dir * *cur;
+        ray_origin + dir * (*f * full)
     } else {
-        cam_tf.translation = target;
-    }
+        target
+    };
+    // A/B diagnostic: `ExtraSmooth` restores the pre-July camera position lerp
+    // on top of the follow smoothing (`FollowCamera::lerp_speed`).
+    cam_tf.translation = if cam_mode == CamDiagMode::ExtraSmooth {
+        let t = (follow.lerp_speed * dt).min(1.0);
+        cam_tf.translation.lerp(desired, t)
+    } else {
+        desired
+    };
     cam_tf.look_at(new_s + follow.look_offset, Vec3::Y);
 }
 
@@ -1190,6 +1208,138 @@ pub fn manage_cursor_grab(
     } else if window.cursor_options.grab_mode != CursorGrabMode::None {
         window.cursor_options.grab_mode = CursorGrabMode::None;
         window.cursor_options.visible = true;
+    }
+}
+
+// --- Diagnostics (F3 overlay, F4/F5 camera A/B modes) ---
+
+/// Camera behavior under test. `Default` is the current shipping behavior,
+/// `Rigid` disables all follow smoothing (camera glued to its target), and
+/// `ExtraSmooth` re-adds the pre-July camera position lerp on top.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub enum CamDiagMode {
+    #[default]
+    Default,
+    Rigid,
+    ExtraSmooth,
+}
+
+impl CamDiagMode {
+    fn label(self) -> &'static str {
+        match self {
+            CamDiagMode::Default => "default",
+            CamDiagMode::Rigid => "rigid (F4)",
+            CamDiagMode::ExtraSmooth => "extra-smooth (F5)",
+        }
+    }
+}
+
+/// Runtime diagnostics state, toggled by hotkeys from any screen.
+#[derive(Resource, Default)]
+pub struct DiagState {
+    pub overlay: bool,
+    pub cam_mode: CamDiagMode,
+}
+
+#[derive(Component)]
+pub struct DiagOverlayText;
+
+/// F3 toggles the frame-time overlay; F4/F5 toggle the camera A/B modes
+/// (pressing the active mode's key again returns to the default camera).
+pub fn diag_hotkeys(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut diag: ResMut<DiagState>,
+    mut commands: Commands,
+    overlay_q: Query<Entity, With<DiagOverlayText>>,
+) {
+    if keyboard.just_pressed(KeyCode::F3) {
+        diag.overlay = !diag.overlay;
+        if diag.overlay && overlay_q.is_empty() {
+            commands.spawn((
+                Text::new(""),
+                TextFont { font_size: 16.0, ..default() },
+                TextColor(Color::srgb(0.4, 1.0, 0.4)),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(8.0),
+                    left: Val::Px(8.0),
+                    ..default()
+                },
+                GlobalZIndex(100),
+                DiagOverlayText,
+            ));
+        } else if !diag.overlay {
+            for e in &overlay_q {
+                commands.entity(e).despawn_recursive();
+            }
+        }
+    }
+    if keyboard.just_pressed(KeyCode::F4) {
+        diag.cam_mode = if diag.cam_mode == CamDiagMode::Rigid {
+            CamDiagMode::Default
+        } else {
+            CamDiagMode::Rigid
+        };
+    }
+    if keyboard.just_pressed(KeyCode::F5) {
+        diag.cam_mode = if diag.cam_mode == CamDiagMode::ExtraSmooth {
+            CamDiagMode::Default
+        } else {
+            CamDiagMode::ExtraSmooth
+        };
+    }
+}
+
+/// Collects real frame times and refreshes the overlay four times a second.
+/// Reports average FPS, the worst frame in the window, and how many frames
+/// deviated >50% from the window median (pacing spikes) — flat frame times
+/// with visible stutter point at motion/camera code, spiky ones at hitches.
+pub fn diag_overlay_update(
+    real_time: Res<Time<Real>>,
+    diag: Res<DiagState>,
+    mut history: Local<Vec<f32>>,
+    mut refresh: Local<f32>,
+    mut text_q: Query<&mut Text, With<DiagOverlayText>>,
+) {
+    if !diag.overlay {
+        history.clear();
+        *refresh = 0.0;
+        return;
+    }
+    let dt = real_time.delta_secs();
+    if dt > 0.0 {
+        history.push(dt);
+        if history.len() > 240 {
+            let excess = history.len() - 240;
+            history.drain(..excess);
+        }
+    }
+    *refresh -= dt;
+    if *refresh > 0.0 || history.len() < 10 {
+        return;
+    }
+    *refresh = 0.25;
+
+    let mut sorted = history.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[sorted.len() / 2];
+    let avg = history.iter().sum::<f32>() / history.len() as f32;
+    let worst = *sorted.last().unwrap();
+    let spikes = history.iter().filter(|&&d| d > median * 1.5).count();
+
+    if let Ok(mut text) = text_q.get_single_mut() {
+        let s = format!(
+            "fps {:>5.1}  frame avg {:>5.2}ms  worst {:>6.2}ms\nspikes(>1.5x median) {:>3}/{}  cam: {}",
+            1.0 / avg,
+            avg * 1000.0,
+            worst * 1000.0,
+            spikes,
+            history.len(),
+            diag.cam_mode.label(),
+        );
+        if **text != s {
+            **text = s;
+        }
     }
 }
 

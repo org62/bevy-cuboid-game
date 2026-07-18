@@ -250,6 +250,7 @@ fn main() {
         .init_resource::<shared_ui::CameraOrbit>()
         .init_resource::<shared_ui::ActiveInput>()
         .init_resource::<shared_ui::MouseSettings>()
+        .init_resource::<shared_ui::DiagState>()
         .add_systems(OnEnter(Screen::Menu), reset_pause)
         .add_systems(
             Update,
@@ -258,6 +259,8 @@ fn main() {
                 shared_ui::update_controls_hint,
                 shared_ui::manage_cursor_grab,
                 shared_ui::update_objective_banner,
+                shared_ui::diag_hotkeys,
+                shared_ui::diag_overlay_update,
             ),
         )
         // Controls (C) / Settings (E) dialogs, everywhere except while typing
