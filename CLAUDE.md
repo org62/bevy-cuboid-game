@@ -1,5 +1,30 @@
 # Engineering notes for this codebase
 
+## Frame pacing: time is smoothed once, and the camera is rigid
+
+Driver-side vsync pacing jitter (raw `Time::delta` oscillating short/long
+around the refresh interval while frames present at a steady cadence)
+reads as game-wide judder if the simulation integrates raw deltas.
+`src/frame_pacing.rs` fixes this ONCE, centrally: it rewrites the default
+`Time` each frame by snapping the cumulative timeline to the display's
+vsync grid (interval anchored to the OS-reported monitor rate). Rules:
+
+- Do not smooth, clamp, or average `time.delta_secs()` again inside any
+  system — double smoothing recreates the judder.
+- The follow camera is rigidly anchored to the player by design. Do not
+  add positional smoothing/lerp layers to it (or to the player mesh):
+  every such layer re-integrates frame-time jitter and shows it as
+  judder. This was field-tested on real hardware; rigid won.
+- `desired_maximum_frame_latency` stays at 1 and present mode stays Fifo;
+  raising the latency reintroduces short/long dt oscillation.
+- Zero-length simulation steps are legal (a fast loop iteration between
+  two grid lines). Never divide by `dt`.
+- F3 toggles the frame-pacing overlay (raw vs sim frame times). It is the
+  first stop for any "choppy" report: healthy pacing shows sim spikes
+  near 0 and drift within about half a refresh interval; `sim avg` far
+  from `raw avg` means the game is running slow/fast — an estimator or
+  snapping bug, not a feel issue.
+
 ## Terrain collision lives in `src/terrain.rs` — don't fork it
 
 All player-vs-terrain collision (surface snapping, wall pushout, ceilings)
