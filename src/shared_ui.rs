@@ -1329,9 +1329,10 @@ pub fn diag_overlay_update(
 
     if let Ok(mut text) = text_q.get_single_mut() {
         let s = format!(
-            "fps {:>5.1}  refresh est {:>5.2}ms  cam: {}\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}",
+            "fps {:>5.1}  refresh est {:>5.2}ms  drift {:>+5.1}ms  cam: {}\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}",
             1.0 / raw_avg,
             pacing.interval * 1000.0,
+            pacing.drift_ms(),
             diag.cam_mode.label(),
             raw_avg * 1000.0,
             raw_worst * 1000.0,

@@ -40,15 +40,54 @@ pub struct FramePacing {
     smoothed_elapsed: Option<Duration>,
 }
 
+impl FramePacing {
+    /// Current simulation-vs-wall-clock drift awaiting repayment, in ms.
+    pub fn drift_ms(&self) -> f32 {
+        self.accumulated_error * 1000.0
+    }
+}
+
 /// Rolling window length (frames). Two seconds at 60Hz — long enough for a
-/// stable median, short enough to re-adapt quickly after a refresh change.
+/// stable estimate, short enough to re-adapt quickly after a refresh change.
 const HISTORY: usize = 120;
-/// Snap when the raw delta is within this fraction of the interval of a
-/// whole multiple. Beyond it the frame is a genuine hitch — pass it through.
-const SNAP_TOLERANCE: f32 = 0.30;
+/// Frames spanning more than this many refresh intervals are genuine hitches:
+/// pass them through unsmoothed instead of snapping.
+const HITCH_PERIODS: f32 = 4.0;
 /// Cap on drift repayment per frame, as a fraction of the interval. Keeps
 /// the correction itself invisible.
 const ERROR_CORRECTION: f32 = 0.10;
+
+/// Estimate the display refresh interval from a window of raw frame deltas.
+///
+/// A median or plain mean both fail under real pacing jitter (e.g. many
+/// ~14ms frames and fewer ~20-35ms ones at a true 16.7ms cadence): the
+/// median lands on the short cluster and the mean is skewed by dropped
+/// frames. Instead solve for the self-consistent interval: every frame
+/// spans a whole number of refresh periods, so the interval is
+/// `total_time / total_periods` where each frame's period count is its
+/// delta rounded to multiples of the current estimate. A few fixed-point
+/// iterations from the mean converge for any jitter distribution.
+fn estimate_refresh_interval(history: &[f32]) -> f32 {
+    let mut est = history.iter().sum::<f32>() / history.len() as f32;
+    for _ in 0..3 {
+        est = est.clamp(1.0 / 500.0, 1.0 / 20.0);
+        let mut total_time = 0.0;
+        let mut total_periods = 0.0;
+        for &dt in history {
+            let k = (dt / est).round().max(1.0);
+            // Hitches (alt-tab, shader compiles…) span an unknowable number
+            // of periods — keep them out of the estimate entirely.
+            if k <= HITCH_PERIODS {
+                total_time += dt;
+                total_periods += k;
+            }
+        }
+        if total_periods > 0.0 {
+            est = total_time / total_periods;
+        }
+    }
+    est.clamp(1.0 / 500.0, 1.0 / 20.0)
+}
 
 fn push(history: &mut Vec<f32>, value: f32) {
     history.push(value);
@@ -78,32 +117,25 @@ fn smooth_frame_time(
         return;
     }
 
-    // Estimate the display interval as the median recent raw frame time.
-    // The median is robust against both hitches and the short frames that
-    // pair with them.
     let n = pacing.raw_history.len();
     if n < 20 {
         let used = time.delta_secs();
         push(&mut pacing.used_history, used);
         return;
     }
-    let mut sorted = pacing.raw_history.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let interval = sorted[n / 2].clamp(1.0 / 500.0, 1.0 / 20.0);
+    let interval = estimate_refresh_interval(&pacing.raw_history);
     pacing.interval = interval;
 
-    // Snap to the nearest whole number of intervals when close enough.
+    // Snap every non-hitch frame to a whole number of refresh intervals —
+    // that is when the frame was actually shown, so integrating with exactly
+    // that step is what makes displayed motion even. Only genuine hitches
+    // pass through raw.
     let k = (raw / interval).round().max(1.0);
-    let snapped = k * interval;
-    let mut used = if (raw - snapped).abs() <= SNAP_TOLERANCE * interval {
-        snapped
-    } else {
-        raw
-    };
+    let mut used = if k <= HITCH_PERIODS { k * interval } else { raw };
 
     // Pay back the raw-vs-used drift a little at a time so long-run
     // simulation time matches wall-clock time.
-    pacing.accumulated_error += raw - used;
+    pacing.accumulated_error = (pacing.accumulated_error + raw - used).clamp(-0.25, 0.25);
     let correction = pacing
         .accumulated_error
         .clamp(-ERROR_CORRECTION * interval, ERROR_CORRECTION * interval);
@@ -124,4 +156,58 @@ fn smooth_frame_time(
     smoothed.advance_by(Duration::from_secs_f32(used.max(0.0)));
     pacing.smoothed_elapsed = Some(smoothed.elapsed());
     *time = smoothed;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HZ60: f32 = 1.0 / 60.0;
+
+    /// The pattern observed on the user's machine: raw deltas oscillating
+    /// short/long (median ~14.2ms) while presenting at a true 60Hz cadence
+    /// (avg 16.66ms). A median estimator returns 14.2 here; the
+    /// self-consistent estimator must return the real interval.
+    #[test]
+    fn jittered_60hz_estimates_true_interval() {
+        let mut history = Vec::new();
+        for i in 0..120 {
+            history.push(if i % 2 == 0 { 0.01424 } else { 0.01909 });
+        }
+        let est = estimate_refresh_interval(&history);
+        assert!(
+            (est - HZ60).abs() < 0.0005,
+            "estimated {:.5}, expected ~{:.5}",
+            est,
+            HZ60
+        );
+    }
+
+    #[test]
+    fn dropped_frames_count_as_two_periods() {
+        let mut history = vec![HZ60; 110];
+        history.extend(std::iter::repeat(2.0 * HZ60).take(10));
+        let est = estimate_refresh_interval(&history);
+        assert!((est - HZ60).abs() < 0.0005, "estimated {:.5}", est);
+    }
+
+    #[test]
+    fn hitches_are_excluded_from_the_estimate() {
+        let mut history = vec![HZ60; 116];
+        history.extend([0.2, 0.5, 1.0, 2.0]); // alt-tab class outliers
+        let est = estimate_refresh_interval(&history);
+        assert!((est - HZ60).abs() < 0.0005, "estimated {:.5}", est);
+    }
+
+    #[test]
+    fn high_refresh_rates_estimate_correctly() {
+        let hz144 = 1.0 / 144.0;
+        let mut history = Vec::new();
+        for i in 0..120 {
+            // ±30% jitter around the 144Hz interval.
+            history.push(if i % 2 == 0 { hz144 * 0.72 } else { hz144 * 1.28 });
+        }
+        let est = estimate_refresh_interval(&history);
+        assert!((est - hz144).abs() < 0.0005, "estimated {:.5}", est);
+    }
 }
