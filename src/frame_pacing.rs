@@ -35,16 +35,18 @@ pub struct FramePacing {
     pub used_history: Vec<f32>,
     /// Estimated display refresh interval (seconds); 0 until warmed up.
     pub interval: f32,
-    /// Raw-minus-used drift still to be paid back (seconds).
-    accumulated_error: f32,
+    /// How far the measured timeline sits ahead (+) of the snapped
+    /// simulation timeline, in seconds. Bounded by ±half an interval.
+    leftover: f32,
     /// Elapsed time of the rewritten `Time`, for cross-frame continuity.
     smoothed_elapsed: Option<Duration>,
 }
 
 impl FramePacing {
-    /// Current simulation-vs-wall-clock drift awaiting repayment, in ms.
+    /// Current simulation-vs-wall-clock offset, in ms. Structurally bounded
+    /// by roughly half a refresh interval.
     pub fn drift_ms(&self) -> f32 {
-        self.accumulated_error * 1000.0
+        self.leftover * 1000.0
     }
 }
 
@@ -54,9 +56,27 @@ const HISTORY: usize = 120;
 /// Frames spanning more than this many refresh intervals are genuine hitches:
 /// pass them through unsmoothed instead of snapping.
 const HITCH_PERIODS: f32 = 4.0;
-/// Cap on drift repayment per frame, as a fraction of the interval. Keeps
-/// the correction itself invisible.
-const ERROR_CORRECTION: f32 = 0.10;
+
+/// Snap one frame of the cumulative timeline to the vsync grid.
+///
+/// Rounding each delta independently misclassifies extreme-but-single frames
+/// (a 25ms measurement at a true 60Hz cadence rounds to two periods), and
+/// those errors add up into sustained slow motion. Carrying the `leftover`
+/// between the measured and snapped timelines instead means a mistimed
+/// measurement is paid back by the very next frames, and the simulation
+/// clock can never drift more than about half an interval from wall clock.
+/// Returns `(used_delta, new_leftover)`.
+fn snap_to_grid(leftover: f32, raw: f32, interval: f32) -> (f32, f32) {
+    let acc = leftover + raw;
+    let k = (acc / interval).round().max(0.0);
+    if k > HITCH_PERIODS {
+        // Genuine hitch: pass it through and resync the grid phase.
+        (raw, 0.0)
+    } else {
+        let used = k * interval;
+        (used, (acc - used).clamp(-interval, interval))
+    }
+}
 
 /// Estimate the display refresh interval from a window of raw frame deltas,
 /// optionally anchored to the OS-reported monitor refresh rate.
@@ -165,29 +185,14 @@ fn smooth_frame_time(
     let interval = estimate_refresh_interval(&pacing.raw_history, monitor_interval);
     pacing.interval = interval;
 
-    // Snap every non-hitch frame to a whole number of refresh intervals —
-    // that is when the frame was actually shown, so integrating with exactly
-    // that step is what makes displayed motion even. Only genuine hitches
-    // pass through raw.
-    let k = (raw / interval).round().max(1.0);
-    let mut used = if k <= HITCH_PERIODS { k * interval } else { raw };
-
-    // Pay back the raw-vs-used drift a little at a time so long-run
-    // simulation time matches wall-clock time. Runaway drift means the
-    // interval estimate is structurally wrong — forget the debt rather than
-    // dragging the game into slow motion trying to repay it.
-    pacing.accumulated_error += raw - used;
-    if pacing.accumulated_error.abs() > 0.2 {
-        pacing.accumulated_error = 0.0;
-    }
-    let correction = pacing
-        .accumulated_error
-        .clamp(-ERROR_CORRECTION * interval, ERROR_CORRECTION * interval);
-    used += correction;
-    pacing.accumulated_error -= correction;
+    // Snap the cumulative timeline to the vsync grid: frames are *shown* at
+    // whole refresh intervals, so integrating with exactly those steps is
+    // what makes displayed motion even. Only genuine hitches pass through.
+    let (used, leftover) = snap_to_grid(pacing.leftover, raw, interval);
+    pacing.leftover = leftover;
 
     // Respect the virtual clock's hitch clamp (default 250ms max step).
-    used = used.min(virt.max_delta().as_secs_f32());
+    let used = used.min(virt.max_delta().as_secs_f32());
     push(&mut pacing.used_history, used);
 
     // Rewrite the default `Time` the game's systems read, keeping elapsed
@@ -273,6 +278,66 @@ mod tests {
         history.extend([0.2, 0.5, 1.0, 2.0]); // alt-tab class outliers
         let est = estimate_refresh_interval(&history, None);
         assert!((est - HZ60).abs() < 0.0005, "estimated {:.5}", est);
+    }
+
+    /// Regression: independently rounding each delta classified extreme
+    /// single frames (24-35ms measurements at a true 60Hz cadence) as
+    /// doubles, accumulating into ~16% sustained slow motion (observed as
+    /// sim avg 19.9ms vs raw 16.7ms). Grid snapping must keep the snapped
+    /// timeline within half an interval of the measured one, always.
+    #[test]
+    fn grid_snapping_bounds_drift_under_extreme_jitter() {
+        // 60Hz cadence with severe measurement jitter: repeating pattern of
+        // frames summing to 4 true periods (26 + 8 + 19 + 13.6 ≈ 66.6ms).
+        let pattern = [0.026, 0.008, 0.019, 0.0136];
+        let mut leftover = 0.0;
+        let mut cum_raw = 0.0;
+        let mut cum_used = 0.0;
+        for i in 0..400 {
+            let raw = pattern[i % pattern.len()];
+            let (used, next) = snap_to_grid(leftover, raw, HZ60);
+            leftover = next;
+            cum_raw += raw;
+            cum_used += used;
+            // Every used delta is a whole number of periods.
+            let k = used / HZ60;
+            assert!((k - k.round()).abs() < 1e-4, "non-grid delta {used}");
+            // The snapped timeline never departs the measured one by more
+            // than an interval.
+            assert!(
+                (cum_raw - cum_used).abs() <= HZ60 + 1e-4,
+                "drift {:.4} after frame {}",
+                cum_raw - cum_used,
+                i
+            );
+        }
+        let avg_used = cum_used / 400.0;
+        let avg_raw = cum_raw / 400.0;
+        assert!(
+            (avg_used - avg_raw).abs() < 0.0005,
+            "sim avg {:.5} diverged from raw avg {:.5} — sustained slow motion",
+            avg_used,
+            avg_raw
+        );
+    }
+
+    /// Hitches pass through raw and resync the grid phase.
+    #[test]
+    fn grid_snapping_passes_hitches_through() {
+        let (used, leftover) = snap_to_grid(0.004, 0.5, HZ60);
+        assert_eq!(used, 0.5);
+        assert_eq!(leftover, 0.0);
+    }
+
+    /// A fast loop iteration between two grid lines yields a zero-length
+    /// simulation step rather than inventing time.
+    #[test]
+    fn grid_snapping_can_emit_zero_steps() {
+        // Previous frame overshot (leftover well negative), next raw frame
+        // is short: no grid line was crossed.
+        let (used, leftover) = snap_to_grid(-0.008, 0.010, HZ60);
+        assert_eq!(used, 0.0);
+        assert!((leftover - 0.002).abs() < 1e-6);
     }
 
     #[test]
