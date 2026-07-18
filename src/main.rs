@@ -232,6 +232,10 @@ fn main() {
                 title: "Debugger Challenges".to_string(),
                 resolution: (800.0, 500.0).into(),
                 present_mode: PresentMode::Fifo,
+                // Candidate frame-pacing fix: keep the CPU at most one frame
+                // ahead of the GPU so Time::delta stops oscillating around the
+                // vsync interval (short/long frame alternation = judder).
+                desired_maximum_frame_latency: core::num::NonZeroU32::new(1),
                 ..default()
             }),
             ..default()
