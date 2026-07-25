@@ -39,6 +39,39 @@ Empirically, locking dropped the per-frame sim-step deviation from ~13.8ms
   about one refresh interval. `sim avg` far from `raw avg` means the game
   is running slow/fast — an estimator or pacing bug, not a feel issue.
 
+## Raw mouse motion is normalized once, in `src/raw_mouse.rs`
+
+`MouseMotion` is winit's raw device motion. On a local mouse it is a relative
+delta in mouse counts; on an **absolute** pointer — RDP's virtual mouse, VM
+guest pointers, some streaming clients — it is the pointer's *position*
+normalized over `0..=65535`, and winit 0.30 forwards it unchanged because
+`MOUSE_MOVE_RELATIVE` is `0`, making its `has_flag(usFlags, MOUSE_MOVE_RELATIVE)`
+test `x & 0 == 0` — always true. Measured in a live RDP session (2560x1440,
+`usFlags = 0x0003`), every event carried `lLastX ~32500, lLastY ~31900`: a
+constant, same-signed, enormous "delta" that whips the camera around.
+
+- **Read `RawMouse::delta`, never `MouseMotion`.** `accumulate_raw_mouse`
+  (PreUpdate, after `InputSystem`) differentiates absolute streams back into
+  motion and passes relative ones through untouched.
+- Scaling cannot fix this — a constant offset stays constant. Only
+  differencing works. Do not re-add a sensitivity/scale "fix" for it.
+- Mode detection is streak-based (3 corroborating reports) and a suspected
+  position is never forwarded as motion, latched or not: leaking one is a whip
+  across the whole screen, dropping a few is invisible.
+- Absolute positions are never negative, so a negative component is proof of a
+  relative device and a large same-signed one proof of an absolute device.
+  Small positive values (pointer near the desktop origin) prove nothing — leave
+  the current mode alone.
+- Steps larger than `MAX_ABS_STEP` are warps (reconnect, monitor hop, focus
+  return), not hand motion; drop them but keep the new origin.
+- Absolute reports carry `MOUSE_VIRTUAL_DESKTOP`, so they normalize over the
+  monitor bounding box, not the primary screen — hence `virtual_desktop_size`.
+- F3's overlay shows `mouse relative|absolute (rdp/vm)` plus the frame delta.
+  First stop for any "mouse is too fast/slow/spinning" report.
+- Inherent limitation, not a bug: over RDP the client sends absolute positions,
+  so turning stops when the user's *local* pointer reaches their screen edge.
+  Nothing server-side can warp a physical pointer back.
+
 ## Terrain collision lives in `src/terrain.rs` — don't fork it
 
 All player-vs-terrain collision (surface snapping, wall pushout, ceilings)

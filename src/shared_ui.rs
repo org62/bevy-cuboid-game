@@ -1,4 +1,4 @@
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
@@ -1034,7 +1034,7 @@ pub fn update_camera_orbit(
     gamepads: Query<&Gamepad>,
     time: Res<Time>,
     game_paused: Res<crate::GamePaused>,
-    mut mouse_motion: EventReader<MouseMotion>,
+    raw_mouse: Res<crate::raw_mouse::RawMouse>,
     mut mouse_wheel: EventReader<MouseWheel>,
     windows: Query<&Window, With<PrimaryWindow>>,
     settings: Res<MouseSettings>,
@@ -1081,15 +1081,13 @@ pub fn update_camera_orbit(
     // Mouse free-look: when the cursor is grabbed (see `manage_cursor_grab`)
     // raw motion turns the camera directly, no button needed. When the cursor
     // is released (menu / pause / modal), motion is ignored so it doesn't fight
-    // the UI.
+    // the UI. Motion comes from `RawMouse`, never from `MouseMotion` directly —
+    // see `src/raw_mouse.rs`.
     let cursor_grabbed = windows
         .get_single()
         .map(|w| w.cursor_options.grab_mode != CursorGrabMode::None)
         .unwrap_or(false);
-    let mut look = Vec2::ZERO;
-    for ev in mouse_motion.read() {
-        look += ev.delta;
-    }
+    let look = raw_mouse.delta;
     if cursor_grabbed && look != Vec2::ZERO {
         let sens = settings.sensitivity;
         orbit.yaw -= look.x * MOUSE_YAW_SENS * sens;
@@ -1113,7 +1111,7 @@ pub fn detect_active_input(
     mut active: ResMut<ActiveInput>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut mouse_motion: EventReader<MouseMotion>,
+    raw_mouse: Res<crate::raw_mouse::RawMouse>,
     gamepads: Query<&Gamepad>,
 ) {
     const WATCH: [GamepadButton; 12] = [
@@ -1150,11 +1148,7 @@ pub fn detect_active_input(
     }
 
     // Keyboard/mouse activity flips back (ignore tiny mouse jitter).
-    let mut drag = Vec2::ZERO;
-    for ev in mouse_motion.read() {
-        drag += ev.delta;
-    }
-    let mouse_moved = drag.length() > 2.0;
+    let mouse_moved = raw_mouse.delta.length() > 2.0;
     if keyboard.get_just_pressed().next().is_some()
         || mouse_buttons.get_just_pressed().next().is_some()
         || mouse_moved
@@ -1255,6 +1249,7 @@ pub fn diag_overlay_update(
     real_time: Res<Time<Real>>,
     diag: Res<DiagState>,
     pacing: Res<crate::frame_pacing::FramePacing>,
+    raw_mouse: Res<crate::raw_mouse::RawMouse>,
     mut refresh: Local<f32>,
     mut text_q: Query<&mut Text, With<DiagOverlayText>>,
 ) {
@@ -1273,7 +1268,7 @@ pub fn diag_overlay_update(
 
     if let Ok(mut text) = text_q.get_single_mut() {
         let s = format!(
-            "fps {:>5.1}  refresh est {:>5.2}ms  drift {:>+5.1}ms\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}",
+            "fps {:>5.1}  refresh est {:>5.2}ms  drift {:>+5.1}ms\nraw  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nsim  avg {:>5.2}ms worst {:>6.2}ms spikes {:>3}/{}\nmouse {} delta {:>7.1},{:>7.1}",
             1.0 / raw_avg,
             pacing.interval * 1000.0,
             pacing.drift_ms(),
@@ -1285,6 +1280,9 @@ pub fn diag_overlay_update(
             sim_worst * 1000.0,
             sim_spikes,
             pacing.used_history.len(),
+            if raw_mouse.absolute { "absolute (rdp/vm)" } else { "relative        " },
+            raw_mouse.delta.x,
+            raw_mouse.delta.y,
         );
         if **text != s {
             **text = s;
