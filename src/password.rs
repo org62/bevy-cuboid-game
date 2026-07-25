@@ -67,9 +67,6 @@ struct AttemptCounterText;
 fn check_password(input: &str) -> bool {
     let correct: &[u8] = b"sesame";
     let input_bytes = input.as_bytes();
-    if input_bytes.len() != correct.len() {
-        return false;
-    }
     let mut i: usize = 0;
     while i < correct.len() {
         if input_bytes[i] != correct[i] {
