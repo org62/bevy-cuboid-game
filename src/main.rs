@@ -231,11 +231,12 @@ fn main() {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Debugger Challenges".to_string(),
-                resolution: (800.0, 500.0).into(),
+                resolution: (800.0_f32, 500.0_f32).into(),
                 present_mode: PresentMode::Fifo,
-                // Candidate frame-pacing fix: keep the CPU at most one frame
-                // ahead of the GPU so Time::delta stops oscillating around the
-                // vsync interval (short/long frame alternation = judder).
+                // Keep the CPU at most one frame ahead of the GPU. Measured on
+                // real hardware this gives the tightest frame-loop pacing of
+                // the Fifo latency options (raising it widens the raw-delta
+                // swing); frame_pacing then locks the sim to the refresh grid.
                 desired_maximum_frame_latency: core::num::NonZeroU32::new(1),
                 ..default()
             }),

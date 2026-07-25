@@ -1,13 +1,26 @@
 # Engineering notes for this codebase
 
-## Frame pacing: time is smoothed once, and the camera is rigid
+## Frame pacing: lock the sim to the refresh grid, and the camera is rigid
 
-Driver-side vsync pacing jitter (raw `Time::delta` oscillating short/long
-around the refresh interval while frames present at a steady cadence)
-reads as game-wide judder if the simulation integrates raw deltas.
-`src/frame_pacing.rs` fixes this ONCE, centrally: it rewrites the default
-`Time` each frame by snapping the cumulative timeline to the display's
-vsync grid (interval anchored to the OS-reported monitor rate). Rules:
+Under Fifo vsync the display scans out exactly one frame per refresh, but
+the CPU-side frame loop returns at wildly uneven times — measured on real
+hardware, a trivial scene's raw `Time::delta` bursts in a 3-frame cycle
+(~1ms / 15ms / 33ms, swapchain queue jitter) while the screen still
+updates every 16.7ms. Integrating motion with those raw deltas reads as
+game-wide judder, *worst when the camera rotates* (the whole screen is in
+parallax motion). `src/frame_pacing.rs` fixes this ONCE, centrally, by
+rewriting the default `Time` each frame.
+
+The correct model — and the one `pace_locked` implements — is to advance
+the sim by exactly ONE refresh interval per presented frame (interval
+anchored to the OS-reported monitor rate), carrying a bounded debt term so
+genuine frame drops are still repaid and sim time tracks wall clock
+long-term. Do NOT go back to rounding the raw delta to the nearest whole
+refresh (the old `snap_to_grid`): the raw delta is a CPU-loop-timing
+artifact that does not track scanout, so rounding it reproduces the same
+0 / 1 / 2-interval cadence as the burst and bakes the judder right back in.
+Empirically, locking dropped the per-frame sim-step deviation from ~13.8ms
+(snapping) to ~2.6ms. Rules:
 
 - Do not smooth, clamp, or average `time.delta_secs()` again inside any
   system — double smoothing recreates the judder.
@@ -16,14 +29,15 @@ vsync grid (interval anchored to the OS-reported monitor rate). Rules:
   every such layer re-integrates frame-time jitter and shows it as
   judder. This was field-tested on real hardware; rigid won.
 - `desired_maximum_frame_latency` stays at 1 and present mode stays Fifo;
-  raising the latency reintroduces short/long dt oscillation.
-- Zero-length simulation steps are legal (a fast loop iteration between
-  two grid lines). Never divide by `dt`.
+  measured on real hardware this gives the tightest frame-loop pacing of
+  the Fifo latency options (raising it widens the raw-delta swing).
+- Rare zero- or double-length sim steps are legal (the debt term repaying
+  a drop or a burst frame). Never divide by `dt`.
 - F3 toggles the frame-pacing overlay (raw vs sim frame times). It is the
-  first stop for any "choppy" report: healthy pacing shows sim spikes
-  near 0 and drift within about half a refresh interval; `sim avg` far
-  from `raw avg` means the game is running slow/fast — an estimator or
-  snapping bug, not a feel issue.
+  first stop for any "choppy" report: with locking, `raw` stays spiky but
+  `sim` should be nearly flat (spikes near 0) with `drift` bounded within
+  about one refresh interval. `sim avg` far from `raw avg` means the game
+  is running slow/fast — an estimator or pacing bug, not a feel issue.
 
 ## Terrain collision lives in `src/terrain.rs` — don't fork it
 

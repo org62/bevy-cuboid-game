@@ -5,7 +5,7 @@ use crate::player::{
 };
 use crate::shared_ui;
 use crate::terrain::{
-    CameraOccluder, SolidBlock, TerrainConfig, TerrainSurface, WaterSlideSegment,
+    SolidBlock, TerrainConfig, TerrainSurface, WaterSlideSegment,
 };
 use crate::Screen;
 
@@ -155,7 +155,6 @@ pub(super) fn setup_hill(
             commands.spawn((
                 TerrainSurface { min: Vec2::new(-half, -half), max: Vec2::new(-tunnel_half_w, half), y: y_top },
                 SolidBlock { min: Vec2::new(-half, -half), max: Vec2::new(-tunnel_half_w, half), y_min: y_bot, y_max: y_top },
-                CameraOccluder,
                 HillEntity,
             ));
             // Right half
@@ -169,7 +168,6 @@ pub(super) fn setup_hill(
             commands.spawn((
                 TerrainSurface { min: Vec2::new(tunnel_half_w, -half), max: Vec2::new(half, half), y: y_top },
                 SolidBlock { min: Vec2::new(tunnel_half_w, -half), max: Vec2::new(half, half), y_min: y_bot, y_max: y_top },
-                CameraOccluder,
                 HillEntity,
             ));
         } else {
@@ -182,10 +180,14 @@ pub(super) fn setup_hill(
             commands.spawn((
                 TerrainSurface { min: Vec2::new(-half, -half), max: Vec2::new(half, half), y: y_top },
                 SolidBlock { min: Vec2::new(-half, -half), max: Vec2::new(half, half), y_min: y_bot, y_max: y_top },
-                CameraOccluder,
                 HillEntity,
             ));
         }
+        // NOTE: hill tiers are deliberately NOT CameraOccluders. They are a
+        // climbable staircase; tagging them dollied the camera hard into the
+        // ground whenever the sightline crossed a tier as the player climbed
+        // (CLAUDE.md: never tag walk-on geometry). Only true walls (the maze
+        // interior) occlude on this level.
     }
 
     // Tunnel ceiling (at y=3, spanning the tunnel length)
