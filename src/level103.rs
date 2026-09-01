@@ -1,46 +1,41 @@
 ﻿use bevy::prelude::*;
 
+use crate::level_kit::{self, GameplaySet};
 use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, GroundYOverride,
-    MovementBounds, Player, PlayerMovementSet, PlayerPhysics,
+    spawn_player, GroundYOverride, MovementBounds, Player, PlayerPhysics,
 };
 use crate::shared_ui;
 use crate::terrain::{
-    terrain_collision, CameraOccluder, SolidBlock, TerrainConfig, TerrainSurface,
-    WaterSlideSegment, SLIDE_CARRY_SPEED,
+    CameraOccluder, SolidBlock, TerrainConfig, TerrainSurface, WaterSlideSegment,
+    SLIDE_CARRY_SPEED,
 };
-use crate::{Screen, Scoreboard, WaterparkPhase};
+use crate::level_kit::{LevelPhase, VictoryText};
+use crate::Screen;
 
-pub struct Level103Plugin;
+pub const ID: u32 = 103;
+const SCREEN: Screen = Screen::Level(ID);
 
-impl Plugin for Level103Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::WaterparkChallenge), setup_waterpark)
-            .add_systems(
-                Update,
-                (
-                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
-                    player_movement.in_set(PlayerMovementSet),
-                    terrain_collision,
-                    water_slide_system,
-                    (animate_player, shared_ui::follow_camera_system),
-                    snack_eat_system,
-                    slides_complete_check,
-                    update_progress_text,
-                )
-                    .chain()
-                    .run_if(in_state(WaterparkPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(WaterparkPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                handle_victory.run_if(in_state(WaterparkPhase::Victory)),
-            )
-            .add_systems(OnExit(Screen::WaterparkChallenge), cleanup_waterpark);
-    }
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_waterpark)
+        .add_systems(
+            Update,
+            // Scripted: the slide overrides the collision-resolved position,
+            // so it must land before the camera reads it.
+            water_slide_system
+                .in_set(GameplaySet::Scripted)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+        .add_systems(
+            Update,
+            (snack_eat_system, slides_complete_check, update_progress_text)
+                .chain()
+                .in_set(GameplaySet::Logic)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+        .add_systems(
+            OnExit(SCREEN),
+            (level_kit::despawn_level::<WaterparkEntity>, cleanup_waterpark),
+        );
 }
 
 // --- Components ---
@@ -88,6 +83,10 @@ fn setup_waterpark(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.7, 0.85, 0.95)));
+    commands.insert_resource(VictoryText::with_subtitle(
+        "WATERPARK COMPLETE!",
+        "You rode every colored slide!",
+    ));
     commands.insert_resource(GroundYOverride(-2.5));
     commands.insert_resource(TerrainConfig::standard(-POOL_DEPTH - 0.5));
     commands.insert_resource(SlidesRidden::default());
@@ -571,12 +570,10 @@ fn snack_eat_system(
 
 fn slides_complete_check(
     ridden: Res<SlidesRidden>,
-    mut scoreboard: ResMut<Scoreboard>,
-    mut next_phase: ResMut<NextState<WaterparkPhase>>,
+    mut next_phase: ResMut<NextState<LevelPhase>>,
 ) {
     if ridden.0.iter().all(|&b| b) {
-        scoreboard.set_solved(103);
-        next_phase.set(WaterparkPhase::Victory);
+        next_phase.set(LevelPhase::Victory);
     }
 }
 
@@ -591,39 +588,10 @@ fn update_progress_text(
     }
 }
 
-// --- Victory ---
-
-fn handle_victory(
-    mut commands: Commands,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
-    mut next_screen: ResMut<NextState<Screen>>,
-) {
-    if overlay_q.is_empty() {
-        shared_ui::spawn_victory_overlay(
-            &mut commands,
-            "WATERPARK COMPLETE!",
-            Some("You rode every colored slide!"),
-            22.0,
-            "Press ENTER to return to menu",
-            WaterparkEntity,
-        );
-    }
-    let pressed = keyboard.just_pressed(KeyCode::Enter)
-        || gamepads.iter().any(|g| g.just_pressed(GamepadButton::South));
-    if pressed {
-        next_screen.set(Screen::Menu);
-    }
-}
-
 // --- Cleanup ---
 
-fn cleanup_waterpark(mut commands: Commands, query: Query<Entity, With<WaterparkEntity>>) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
-    commands.remove_resource::<GroundYOverride>();
-    commands.remove_resource::<TerrainConfig>();
+/// Level-private resources only; shared globals (`GroundYOverride`,
+/// `TerrainConfig`) are swept centrally on menu return.
+fn cleanup_waterpark(mut commands: Commands) {
     commands.remove_resource::<SlidesRidden>();
 }

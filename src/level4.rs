@@ -1,44 +1,37 @@
-﻿use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
-use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet,
-};
+use crate::level_kit::{self, GameplaySet, LevelPhase, VictoryText};
+use crate::player::{spawn_player, MovementBounds, Player};
 use crate::shared_ui;
-use crate::{GamePaused, MazePhase, Screen, Scoreboard};
+use crate::terrain::{SolidBlock, TerrainConfig, TerrainSurface};
+use crate::{GamePaused, Screen, Scoreboard};
 
-pub struct Level4Plugin;
+pub const ID: u32 = 4;
+const SCREEN: Screen = Screen::Level(ID);
 
-impl Plugin for Level4Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::MazeChallenge), setup_maze)
-            .add_systems(
-                Update,
-                (
-                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
-                    player_movement.in_set(PlayerMovementSet),
-                    maze_playing_update,
-                )
-                    .chain()
-                    .run_if(in_state(MazePhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                (animate_player, maze_visual_update, shared_ui::hint_tutorial_controls, shared_ui::follow_camera_system)
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::MazeChallenge)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(MazePhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                handle_victory.run_if(in_state(MazePhase::Victory)),
-            )
-            .add_systems(OnExit(Screen::MazeChallenge), cleanup_maze);
-    }
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_maze)
+        .add_systems(
+            Update,
+            check_goal
+                .in_set(GameplaySet::Logic)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+        .add_systems(
+            Update,
+            maze_visual_update
+                .in_set(GameplaySet::Logic)
+                .run_if(in_state(SCREEN)),
+        )
+        // Reveal the maze the player just bypassed behind the victory overlay.
+        .add_systems(
+            OnEnter(LevelPhase::Victory),
+            reveal_walls.run_if(in_state(SCREEN)),
+        )
+        .add_systems(
+            OnExit(SCREEN),
+            (level_kit::despawn_level::<MazeEntity>, cleanup_maze),
+        );
 }
 
 // --- Components ---
@@ -66,6 +59,8 @@ const PLAYER_SPAWN: Vec3 = Vec3::new(-1.0, 0.0, 1.0);
 /// the player can reach by jumping: the only way over is to lift the player's Y
 /// coordinate in memory.
 const WALL_HEIGHT: f32 = 2.5;
+/// Player radius the wall pushout uses (matches the old bespoke collision).
+const WALL_PUSHOUT_MARGIN: f32 = 0.4;
 
 const MAZE_TUTORIAL: &str = "\
 The maze walls are invisible and block you on the ground - but they are only so tall. If you lift the player above the walls, you can simply walk over them to the trophy. A normal jump is not high enough, so you must change the player's height directly in memory.
@@ -91,7 +86,12 @@ fn check_trophy_collected(player_pos: Vec3, trophy_pos: Vec3) -> bool {
     (dx * dx + dy * dy + dz * dz) < 2.0
 }
 
-// --- Invisible wall collision ---
+// --- Maze layout ---
+//
+// Collision is NOT bespoke: each rect becomes a shared-terrain `SolidBlock`
+// spanning y 0..WALL_HEIGHT, so `terrain_collision` does the pushout and a
+// player lifted above the walls passes straight over (the intended debugger
+// solution).
 
 struct WallRect {
     min: Vec2,
@@ -132,7 +132,7 @@ fn wall_rects() -> Vec<WallRect> {
 
 #[cfg(test)]
 fn collides_with_walls(x: f32, z: f32, walls: &[WallRect]) -> bool {
-    let radius = 0.4;
+    let radius = WALL_PUSHOUT_MARGIN;
     for w in walls {
         if x + radius > w.min.x && x - radius < w.max.x
             && z + radius > w.min.y && z - radius < w.max.y
@@ -153,6 +153,11 @@ fn setup_maze(
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.08, 0.1, 0.15)));
     commands.insert_resource(WallsVisible::default());
+    commands.insert_resource(VictoryText::new("TROPHY COLLECTED!"));
+    commands.insert_resource(TerrainConfig {
+        pushout_margin: WALL_PUSHOUT_MARGIN,
+        ..TerrainConfig::standard(-1.0)
+    });
 
     // Dark green ground, sized to exactly cover the walkable arena so the
     // colored floor and the reachable area agree.
@@ -167,6 +172,8 @@ fn setup_maze(
             ..default()
         })),
         Transform::from_xyz(ground_cx, 0.0, ground_cz),
+        // Mesh top and walkable surface derive from the same y = 0.
+        TerrainSurface { min: ARENA_MIN, max: ARENA_MAX, y: 0.0 },
         MazeEntity,
     ));
 
@@ -203,7 +210,9 @@ fn setup_maze(
         MazeEntity,
     ));
 
-    // Wall visuals (hidden by default, toggled with ?)
+    // Walls: one entity per rect carries both the collision (`SolidBlock`)
+    // and the visual mesh (hidden by default, toggled with ?). NOT tagged
+    // `CameraOccluder` — they're walk-over height and would twitch the camera.
     let wall_visual_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(0.4, 0.8, 1.0, 0.35),
         alpha_mode: AlphaMode::Blend,
@@ -220,6 +229,7 @@ fn setup_maze(
             MeshMaterial3d(wall_visual_mat.clone()),
             Transform::from_xyz(cx, WALL_HEIGHT * 0.5, cz),
             Visibility::Hidden,
+            SolidBlock { min: wall.min, max: wall.max, y_min: 0.0, y_max: WALL_HEIGHT },
             WallVisual,
             MazeEntity,
         ));
@@ -257,7 +267,7 @@ fn setup_maze(
         },
         shared_ui::FollowCamera {
             offset: Vec3::new(0.0, 12.0, 12.0),
-            
+
             look_offset: Vec3::Y,
         },
         MazeEntity,
@@ -271,7 +281,7 @@ fn setup_maze(
     );
 
     // Hint box + tutorial modal (hidden; H reveals the hint, T the tutorial)
-    if !scoreboard.is_solved(4) {
+    if !scoreboard.is_solved(ID) {
         shared_ui::spawn_hint_box_with_tutorial(
             &mut commands,
             "Your Y (jump) coordinate is zero when the player is on the ground. The walls only reach so high...",
@@ -289,50 +299,17 @@ fn setup_maze(
 
 // --- Gameplay ---
 
-fn maze_playing_update(
-    mut next_phase: ResMut<NextState<MazePhase>>,
-    mut player_q: Query<&mut Transform, With<Player>>,
+fn check_goal(
+    mut next_phase: ResMut<NextState<LevelPhase>>,
+    player_q: Query<&Transform, With<Player>>,
     game_paused: Res<GamePaused>,
 ) {
     if game_paused.0 { return; }
-    let Ok(mut pt) = player_q.get_single_mut() else {
+    let Ok(pt) = player_q.get_single() else {
         return;
     };
-
-    // Apply invisible wall collision â€” push player out by minimum penetration.
-    // Walls only block up to WALL_HEIGHT: lift the player's Y above the wall
-    // top and they pass straight over (the intended debugger solution).
-    let walls = wall_rects();
-    let radius = 0.4;
-    if pt.translation.y < WALL_HEIGHT {
-      for w in &walls {
-        let px = pt.translation.x;
-        let pz = pt.translation.z;
-        if px + radius > w.min.x && px - radius < w.max.x
-            && pz + radius > w.min.y && pz - radius < w.max.y
-        {
-            let pen_left = px + radius - w.min.x;
-            let pen_right = w.max.x - (px - radius);
-            let pen_top = pz + radius - w.min.y;
-            let pen_bottom = w.max.y - (pz - radius);
-            let min_pen = pen_left.min(pen_right).min(pen_top).min(pen_bottom);
-
-            if min_pen == pen_left {
-                pt.translation.x = w.min.x - radius;
-            } else if min_pen == pen_right {
-                pt.translation.x = w.max.x + radius;
-            } else if min_pen == pen_top {
-                pt.translation.z = w.min.y - radius;
-            } else {
-                pt.translation.z = w.max.y + radius;
-            }
-        }
-      }
-    }
-
-    // Check trophy
     if check_trophy_collected(pt.translation, TROPHY_POS) {
-        next_phase.set(MazePhase::Victory);
+        next_phase.set(LevelPhase::Victory);
     }
 }
 
@@ -366,50 +343,23 @@ fn maze_visual_update(
     }
 }
 
-// --- Victory ---
+// --- Victory hook (overlay and dismissal are the shared flow) ---
 
-fn handle_victory(
-    mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_screen: ResMut<NextState<Screen>>,
-    mut scoreboard: ResMut<Scoreboard>,
+/// Reveal the maze the player just bypassed.
+fn reveal_walls(
     mut walls_visible: ResMut<WallsVisible>,
     mut wall_q: Query<&mut Visibility, With<WallVisual>>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
-    if overlay_q.is_empty() {
-        scoreboard.set_solved(4);
-        // Reveal the maze the player just bypassed.
-        walls_visible.0 = true;
-        for mut v in &mut wall_q {
-            *v = Visibility::Visible;
-        }
-        shared_ui::spawn_victory_overlay(
-            &mut commands,
-            "TROPHY COLLECTED!",
-            None,
-            0.0,
-            "Press any key to continue",
-            MazeEntity,
-        );
-    }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        for entity in &overlay_q {
-            commands.entity(entity).despawn_recursive();
-        }
-        next_screen.set(Screen::Menu);
-        return;
+    walls_visible.0 = true;
+    for mut v in &mut wall_q {
+        *v = Visibility::Visible;
     }
 }
 
 // --- Cleanup ---
 
-fn cleanup_maze(mut commands: Commands, query: Query<Entity, With<MazeEntity>>) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
+fn cleanup_maze(mut commands: Commands) {
+    commands.remove_resource::<WallsVisible>();
 }
 
 #[cfg(test)]
@@ -469,7 +419,7 @@ mod tests {
     #[test]
     fn trophy_not_collected_while_hovering_above() {
         // Flying over the walls at a high Y and hovering above the trophy's XZ
-        // must NOT collect it â€” the player has to descend onto it.
+        // must NOT collect it — the player has to descend onto it.
         let hovering = Vec3::new(TROPHY_POS.x, 5.0, TROPHY_POS.z);
         assert!(!check_trophy_collected(hovering, TROPHY_POS));
 

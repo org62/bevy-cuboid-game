@@ -10,10 +10,12 @@ mod terrain;
 
 use bevy::prelude::*;
 
-use crate::player::{animate_player, escape_to_menu, player_movement, toggle_pause, PlayerMovementSet};
-use crate::shared_ui;
-use crate::terrain::terrain_collision;
-use crate::{HillPhase, Screen};
+use crate::level101::components::HillEntity;
+use crate::level_kit::{self, GameplaySet, LevelPhase};
+use crate::Screen;
+
+pub const ID: u32 = 101;
+const SCREEN: Screen = Screen::Level(ID);
 
 #[cfg(feature = "test_bot")]
 pub use resources::HillState;
@@ -24,42 +26,44 @@ use race::*;
 use setup::*;
 use terrain::*;
 
-pub struct Level101Plugin;
-
-impl Plugin for Level101Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::HillChallenge), setup_hill)
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_hill)
+        .add_systems(
+            Update,
+            summit_victory_check
+                .in_set(GameplaySet::Logic)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+            // Scripted motion: each of these overrides the collision-resolved
+            // player position, so they all have to land before the camera reads
+            // it (this is what the old hand-written `.after(...)` chain on
+            // `follow_camera_system` was doing).
             .add_systems(
                 Update,
                 (
-                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
-                    player_movement.in_set(PlayerMovementSet),
-                    terrain_collision,
-                    summit_victory_check,
+                    slide_force_system,
+                    water_slide_system,
+                    suck_up_animation_system,
+                    teleporter_system,
+                    zip_line_trigger_system,
+                    zip_line_ride_system,
                 )
-                    .chain()
-                    .run_if(in_state(HillPhase::Playing)),
+                    .in_set(GameplaySet::Scripted)
+                    .run_if(in_state(SCREEN)),
             )
             .add_systems(
                 Update,
                 (
-                    animate_player,
-                    slide_force_system,
-                    water_slide_system,
                     apple_collection_system,
                     power_up_timer_system,
                     power_up_bar_ui_system,
                     apple_bob_system,
                     maze_exit_check_system,
-                    suck_up_animation_system,
-                    teleporter_system,
                     maze_rebuild_system,
                     color_cube_system,
-                    zip_line_trigger_system,
-                    zip_line_ride_system,
                 )
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::HillChallenge)),
+                    .in_set(GameplaySet::Logic)
+                    .run_if(in_state(SCREEN)),
             )
             .add_systems(
                 Update,
@@ -72,25 +76,11 @@ impl Plugin for Level101Plugin {
                     race_result_system,
                 )
                     .chain()
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::HillChallenge)),
+                    .in_set(GameplaySet::Logic)
+                    .run_if(in_state(SCREEN)),
             )
             .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(HillPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                shared_ui::follow_camera_system
-                    .after(PlayerMovementSet)
-                    .after(suck_up_animation_system)
-                    .after(zip_line_ride_system)
-                    .run_if(in_state(Screen::HillChallenge)),
-            )
-            .add_systems(
-                Update,
-                handle_victory.run_if(in_state(HillPhase::Victory)),
-            )
-            .add_systems(OnExit(Screen::HillChallenge), cleanup_hill);
-    }
+            OnExit(SCREEN),
+            (level_kit::despawn_level::<HillEntity>, cleanup_hill),
+        );
 }

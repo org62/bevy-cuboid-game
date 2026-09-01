@@ -7,7 +7,6 @@ use crate::shared_ui;
 use crate::terrain::{
     SolidBlock, TerrainConfig, TerrainSurface, WaterSlideSegment,
 };
-use crate::Screen;
 
 use super::components::*;
 use super::constants::*;
@@ -22,6 +21,10 @@ pub(super) fn setup_hill(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.45, 0.7, 0.9)));
+    commands.insert_resource(crate::level_kit::VictoryText::with_subtitle(
+        "SUMMIT REACHED!",
+        "You conquered the Hill Fortress!",
+    ));
     commands.insert_resource(HillState::default());
     commands.insert_resource(GroundYOverride(-3.0));
     // floor_y below any surface (pool floor is at -1.2).
@@ -1093,53 +1096,23 @@ pub(super) fn setup_hill(
     });
 }
 
-/// Sets [`HillPhase::Victory`] when the player stands at the summit flag.
+/// Hands off to the shared victory flow when the player stands at the summit
+/// flag (scoreboard + overlay + dismissal all happen there).
 pub(super) fn summit_victory_check(
     player_q: Query<&Transform, With<crate::player::Player>>,
-    mut next_phase: ResMut<NextState<crate::HillPhase>>,
-    mut scoreboard: ResMut<crate::Scoreboard>,
+    mut next_phase: ResMut<NextState<crate::level_kit::LevelPhase>>,
 ) {
     let Ok(tf) = player_q.get_single() else { return };
     if super::debugger::check_summit_reached(tf.translation) {
-        scoreboard.set_solved(101);
-        next_phase.set(crate::HillPhase::Victory);
+        next_phase.set(crate::level_kit::LevelPhase::Victory);
     }
 }
 
-pub(super) fn handle_victory(
-    mut commands: Commands,
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_screen: ResMut<NextState<Screen>>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
-) {
-    if overlay_q.is_empty() {
-        shared_ui::spawn_victory_overlay(
-            &mut commands,
-            "SUMMIT REACHED!",
-            Some("You conquered the Hill Fortress!"),
-            22.0,
-            "Press ENTER to return to menu",
-            HillEntity,
-        );
-    }
-
-    if keyboard.just_pressed(KeyCode::Enter) {
-        next_screen.set(Screen::Menu);
-    }
-}
-
-pub(super) fn cleanup_hill(
-    mut commands: Commands,
-    query: Query<Entity, With<HillEntity>>,
-) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
+/// Level-private resources only; shared globals (`GroundYOverride`,
+/// `TerrainConfig`, `PowerUpState`) are swept centrally on menu return.
+pub(super) fn cleanup_hill(mut commands: Commands) {
     commands.remove_resource::<HillState>();
-    commands.remove_resource::<GroundYOverride>();
-    commands.remove_resource::<crate::terrain::TerrainConfig>();
     commands.remove_resource::<ActivePowerUps>();
-    commands.remove_resource::<PowerUpState>();
     commands.remove_resource::<AppleAssets>();
     commands.remove_resource::<AppleRng>();
     commands.remove_resource::<MazeCompleted>();

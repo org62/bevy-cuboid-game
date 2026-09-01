@@ -1,12 +1,12 @@
-﻿use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
-use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet, PlayerPhysics,
-};
+use crate::level_kit::{self, DefeatText, GameplaySet, LevelPhase, VictoryText};
+use crate::player::{spawn_player, MovementBounds, Player, PlayerPhysics};
 use crate::shared_ui;
-use crate::{CountdownPhase, GamePaused, Screen, Scoreboard};
+use crate::{GamePaused, Screen};
+
+pub const ID: u32 = 3;
+const SCREEN: Screen = Screen::Level(ID);
 
 /// Long-form walkthrough shown in the tutorial modal (opened with T).
 const BOMB_TUTORIAL: &str = "\
@@ -22,46 +22,25 @@ Method 2 - patch out the decrement:
 2) Replace it with NOPs so the subtraction never runs.
 3) The fuse stays put, the survival timer reaches 25s, and the bomb defuses.";
 
-pub struct Level3Plugin;
-
-impl Plugin for Level3Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::CountdownChallenge), setup_countdown)
-            .add_systems(
-                Update,
-                (
-                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
-                    player_movement.in_set(PlayerMovementSet),
-                    countdown_playing_update,
-                )
-                    .chain()
-                    .run_if(in_state(CountdownPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                (
-                    animate_player,
-                    countdown_visual_update,
-                    shared_ui::follow_camera_system,
-                    shared_ui::hint_tutorial_controls,
-                )
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::CountdownChallenge)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(CountdownPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                handle_victory.run_if(in_state(CountdownPhase::Victory)),
-            )
-            .add_systems(
-                Update,
-                handle_exploded.run_if(in_state(CountdownPhase::Exploded)),
-            )
-            .add_systems(OnExit(Screen::CountdownChallenge), cleanup_countdown);
-    }
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_countdown)
+        .add_systems(
+            Update,
+            countdown_playing_update
+                .in_set(GameplaySet::Logic)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+        .add_systems(
+            Update,
+            countdown_visual_update
+                .in_set(GameplaySet::Logic)
+                .run_if(in_state(SCREEN)),
+        )
+        .add_systems(
+            OnTransition { exited: LevelPhase::Defeat, entered: LevelPhase::Playing },
+            reset_after_explosion.run_if(in_state(SCREEN)),
+        )
+        .add_systems(OnExit(SCREEN), level_kit::despawn_level::<CountdownEntity>);
 }
 
 // --- Components ---
@@ -136,10 +115,17 @@ fn setup_countdown(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    _scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.2, 0.18, 0.15)));
     commands.insert_resource(BombTimer::default());
+    commands.insert_resource(VictoryText::new("BOMB DEFUSED!"));
+    commands.insert_resource(DefeatText {
+        title: "BOOM!".into(),
+        title_font_size: 64.0,
+        subtitle: Some("The bomb exploded!".into()),
+        background: Color::srgba(0.3, 0.05, 0.0, 0.85),
+        ..Default::default()
+    });
 
     // Dark stone floor
     commands.spawn((
@@ -283,7 +269,7 @@ fn setup_countdown(
 fn countdown_playing_update(
     time: Res<Time>,
     mut bomb: ResMut<BombTimer>,
-    mut next_phase: ResMut<NextState<CountdownPhase>>,
+    mut next_phase: ResMut<NextState<LevelPhase>>,
     game_paused: Res<GamePaused>,
 ) {
     if game_paused.0 { return; }
@@ -291,12 +277,12 @@ fn countdown_playing_update(
     tick_bomb_timer(&mut bomb, dt);
 
     if check_bomb_defused(&bomb) {
-        next_phase.set(CountdownPhase::Victory);
+        next_phase.set(LevelPhase::Victory);
         return;
     }
 
     if bomb.remaining <= 0.0 && !bomb.defused {
-        next_phase.set(CountdownPhase::Exploded);
+        next_phase.set(LevelPhase::Defeat);
     }
 }
 
@@ -318,83 +304,21 @@ fn countdown_visual_update(
     }
 }
 
-// --- Victory ---
+// --- Retry hook (overlays and dismissal are the shared flow) ---
 
-fn handle_victory(
-    mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_screen: ResMut<NextState<Screen>>,
-    mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
-) {
-    if overlay_q.is_empty() {
-        scoreboard.set_solved(3);
-        shared_ui::spawn_victory_overlay(
-            &mut commands,
-            "BOMB DEFUSED!",
-            None,
-            0.0,
-            "Press any key to continue",
-            CountdownEntity,
-        );
-    }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        for entity in &overlay_q {
-            commands.entity(entity).despawn_recursive();
-        }
-        next_screen.set(Screen::Menu);
-        return;
-    }
-}
-
-// --- Exploded ---
-
-fn handle_exploded(
-    mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<CountdownPhase>>,
+fn reset_after_explosion(
     mut bomb: ResMut<BombTimer>,
     mut player_q: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
-    if overlay_q.is_empty() {
-        shared_ui::spawn_defeat_overlay(
-            &mut commands,
-            "BOOM!",
-            64.0,
-            Some("The bomb exploded!"),
-            28.0,
-            "Press any key to retry",
-            Color::srgba(0.3, 0.05, 0.0, 0.85),
-            CountdownEntity,
-        );
-    }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        for entity in &overlay_q {
-            commands.entity(entity).despawn_recursive();
-        }
-        *bomb = BombTimer::default();
-        if let Ok((mut t, mut p)) = player_q.get_single_mut() {
-            t.translation = PLAYER_SPAWN;
-            p.velocity = Vec3::ZERO;
-            p.grounded = true;
-        }
-        next_phase.set(CountdownPhase::Playing);
-        return;
+    *bomb = BombTimer::default();
+    if let Ok((mut t, mut p)) = player_q.get_single_mut() {
+        t.translation = PLAYER_SPAWN;
+        p.velocity = Vec3::ZERO;
+        p.grounded = true;
     }
 }
 
 // --- Cleanup ---
-
-fn cleanup_countdown(mut commands: Commands, query: Query<Entity, With<CountdownEntity>>) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
-}
 
 #[cfg(test)]
 mod tests {

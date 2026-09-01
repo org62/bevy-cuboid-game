@@ -1,5 +1,100 @@
 # Engineering notes for this codebase
 
+## Adding a level: one module + one roster row
+
+Levels are declared in exactly one place — the `LEVELS` table in
+`src/levels.rs` (id, title, `register` fn, hidden?, starts_frozen?). The menu
+grid, keyboard/gamepad navigation, the `Solved: n / m` line, the level-id →
+screen mapping, the shared `LevelPhase` sub-state and plugin registration in
+`main` all read that table. There is no per-level `Screen` variant (`Screen`
+is `Menu | Level(u32)`), no per-level phase enum, and nothing to add in
+`main.rs`. Adding a level means:
+
+1. A row in `levels::LEVELS` pointing at the module's `ID` and `register`.
+2. A level module shaped like:
+
+```rust
+pub const ID: u32 = 7;
+const SCREEN: Screen = Screen::Level(ID);
+
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_foo)
+        .add_systems(Update, foo_logic.in_set(GameplaySet::Logic)
+            .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)))
+        .add_systems(OnExit(SCREEN), level_kit::despawn_level::<FooEntity>);
+}
+```
+
+`level_kit::install` (called once in `main`) already registers orbit input,
+`player_movement`, `terrain_collision`, `animate_player`,
+`follow_camera_system`, `escape_to_menu`, `toggle_pause`, the hint/tutorial
+hotkeys and the victory/defeat flow, each in its `GameplaySet` and gated on
+the shared `LevelPhase`. Do not hand-wire any of those per level.
+
+**`LevelPhase` is the shared per-level state machine** (a sub-state existing
+on any `Screen::Level(_)`): `Frozen | Playing | Victory | Defeat`. The sim
+runs only in `Playing`; camera and player animation run in every phase so the
+scene stays alive behind overlays. `Frozen` is for level-driven freezes — the
+race countdown, the password prompt; a level that opens frozen sets
+`starts_frozen` in its roster row (and must opt `escape_to_menu`/`toggle_pause`
+back in for `Frozen` if it wants them there, as level 5 does).
+
+**Winning and losing are the shared flow, not per-level handlers.** Insert
+`level_kit::VictoryText` / `DefeatText` in setup for the wording, then set
+`NextState<LevelPhase>` to `Victory` or `Defeat`. The kit marks the scoreboard
+from the current `Screen::Level(id)` (a level cannot mark the wrong id),
+spawns the overlay, and on any key returns to the menu (victory) or re-enters
+`DefeatText::retry_to` (defeat; `Playing` for most levels, `Frozen` for the
+race's countdown). Level-specific reactions hook the shared state, always
+gated on their own screen:
+
+```rust
+.add_systems(OnEnter(LevelPhase::Victory), reveal_walls.run_if(in_state(SCREEN)))
+.add_systems(OnTransition { exited: LevelPhase::Defeat, entered: LevelPhase::Playing },
+             reset_after_death.run_if(in_state(SCREEN)))
+```
+
+The `run_if(in_state(SCREEN))` on those hooks is not optional: `LevelPhase`
+is shared, so an ungated hook fires on every level's victory/retry.
+
+**The frame order is `GameplaySet`, not `.after(...)`.** `Input → Movement →
+Collision → Scripted → Camera → Logic`, chained once by `level_kit::install`.
+Put each new system in the set that matches what it *does*:
+
+- moves the player under a script (slide, zipline, teleport) → `Scripted`;
+- only reads the final player transform (a bespoke camera) → `Camera`;
+- everything else (goal checks, HUD, pickups, timers) → `Logic`.
+
+This exists because `.after(PlayerMovementSet)` leaves the follow camera
+*unordered* against `terrain_collision`: Bevy may run the camera first, framing
+the pre-collision player position — the raw ballistic one that dips into
+geometry — which reads as camera judder on stairs and hills. Level 101 had
+exactly that bug. A system placed in the right set cannot reintroduce it.
+
+A level that drives its own camera (level 5's race chase cam) just spawns a
+camera *without* a `FollowCamera` component — the shared follow system no-ops
+— and registers its own camera system in `GameplaySet::Camera`. The kit also
+disables orbit-look input when no `FollowCamera` exists: movement is
+orbit-relative, so a live orbit under a fixed camera would invisibly rotate
+the player's movement frame while the view stays put (mouse motion during the
+race made players — and the test bot — veer and drive in circles). Don't
+re-register `update_camera_orbit` on such a level.
+
+**Global resources are swept centrally; you cannot leak them.** On every
+return to the menu, `level_kit::reset_between_levels` removes
+`TerrainConfig`, `GroundYOverride`, `GravityOverride`, `PowerUpState`,
+`VictoryText`, `DefeatText` and `TextInputActive`, despawns stray overlays
+and resets pause/orbit. (These are the resources read by *shared* systems —
+leaking one used to change physics in every level entered afterwards; level 5
+once leaked a 2x-speed `PowerUpState`.) If a new shared-system resource is
+added, add it to that sweep. Level-private resources are re-inserted on entry
+so leaking them is only untidy, but still remove them in the level's `OnExit`.
+
+`level_kit::despawn_level::<Marker>` is the standard entity cleanup. It skips
+entities whose parent carries the same marker (the parent's recursive despawn
+already took them) — despawning them twice is what produced the `B0003 …
+doesn't exist in this World` warning spam on level exit.
+
 ## Frame pacing: lock the sim to the refresh grid, and the camera is rigid
 
 Under Fifo vsync the display scans out exactly one frame per refresh, but
@@ -77,11 +172,17 @@ constant, same-signed, enormous "delta" that whips the camera around.
 All player-vs-terrain collision (surface snapping, wall pushout, ceilings)
 is the single shared system `terrain_collision` in `src/terrain.rs`,
 parameterized per level by the `TerrainConfig` resource (inserted on level
-enter, removed on exit; without it the system is a no-op). The shared
+enter, swept centrally on menu return; without it the system is a no-op). The shared
 module also owns the `TerrainSurface`, `SolidBlock` and `WaterSlideSegment`
-components. When a new level needs terrain collision, insert a
-`TerrainConfig` and register the shared system after `player_movement` —
-do not write a new per-level collision system. If the player is under
+components. A new level gets terrain collision by inserting a
+`TerrainConfig` and nothing else — `level_kit::install` already
+registers the shared system in `GameplaySet::Collision`. Do not write a
+per-level collision system. `TerrainDiag` records what the last resolution
+did (`SnapTo` / `EaseTo` / `Unground`) with the `dy` and `dt` it used;
+assert against that record rather than differencing the transform across
+frames, because a swept catch legitimately moves the player further in one
+frame than `step_ease_rate` allows — a transform diff cannot tell the two
+apart and produces intermittent false failures. If the player is under
 scripted motion (zipline, cutscene), insert `TerrainPhysicsExempt` on the
 player for the duration instead of adding query filters to the shared
 system.
@@ -95,13 +196,13 @@ two cases:
 
 1. **Horizontal sweep skip.** When `velocity_xz * dt` exceeds the smallest
    collider footprint along the motion axis (Level 101 slide steps are
-   2 units wide; Level 102 cells are `CELL` units), the player is over a
-   *different* surface each frame and never satisfies the snap condition for
-   the surfaces they pass over. The visible result is "player keeps falling
-   past surfaces."
+   2 units wide), the player is over a *different* surface each frame and
+   never satisfies the snap condition for the surfaces they pass over. The
+   visible result is "player keeps falling past surfaces."
 2. **Vertical sweep skip.** A surface that lay between `prev_y` and
    `current_y` during the frame is not at `current_y ± tolerance` and gets
-   missed unless `tolerance` is grown to `|vy| * dt + slack`.
+   missed. Catch it with the *swept* test (`prev_y >= surface && current_y <
+   surface`), **not** by growing the point tolerance — see the next section.
 
 Rules when adding or modifying any collision system that compares the player
 against surface entities:
@@ -117,6 +218,19 @@ against surface entities:
   vertical-fall case and is cheaper than the sweep test.
 - Never trigger snap-up when `velocity.y > 0` (the player is jumping). The
   swept check is gated on `vy <= 0` for the same reason.
+- **Never lift a player onto a surface their feet did not reach.** Support
+  *above* the feet is granted only to a grounded walker stepping up, and only
+  by `step_up_limit` (`terrain::step_up_tolerance`). Two ways this went wrong,
+  both of which read to the player as "I jumped short and got dragged up onto
+  the tier above", and both of which also re-grounded them in mid-air so they
+  could jump again from nothing:
+  - the tolerance used to be `|vy| * dt + step_up_limit` for *any* descending
+    player, magneting a fast faller up to ~0.8 units and snapping a jump onto
+    a platform at its apex (`vy ≈ 0` → the full slack);
+  - the phase-through rescue used to fire on every level. It is gated on
+    `ColumnPushout` now: in a heightfield, being under the surface at your XZ
+    means you are inside a solid column and must be pushed out, but on a
+    platform level that airspace is exactly where a short jump leaves you.
 - **Add step-down snapping** for grounded walk-offs. When the player was
   statically grounded last frame (`!was_airborne && vy.abs() < 0.01`) and
   the highest surface at the new XZ is within ~1.5 units below them, snap
@@ -131,7 +245,7 @@ against surface entities:
   step-up/step-down transitions move toward the surface at
   `TerrainConfig::step_ease_rate` (15 u/s) so walking over uneven ground is
   smooth instead of a per-cell teleport. Airborne landings, swept crossings
-  and phased-below rescues must still snap instantly — easing those lets
+  and (heightfield-only) phase rescues must still snap instantly — easing those lets
   the player visibly pass through geometry. Do not add a second, visual-only
   smoothing layer on top (the old `animate_player` mesh-offset lag caused
   the player to hover above steps whenever its rate diverged from the

@@ -1,37 +1,87 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
+use bevy::state::state::FreelyMutableState;
+
+use crate::level1::SCREEN;
+use crate::level_kit::LevelPhase;
 use crate::player::{Player, PlayerPhysics, PLAYER_PUSHBACK};
-use crate::{ChallengePhase, Screen, Scoreboard};
+use crate::shared_ui::TextInputActive;
+use crate::Screen;
 
-pub struct PasswordPlugin;
+/// Level 1's private prompt state machine, layered on top of the shared
+/// [`LevelPhase`]: `Exploring` maps to `Playing`, the two prompt states run
+/// under `Frozen` (sim halted, keyboard captured as text), and a correct
+/// password hands off to `LevelPhase::Victory` for the shared victory flow.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum ChallengePhase {
+    #[default]
+    Exploring,
+    PasswordPrompt,
+    WrongPassword,
+}
 
-impl Plugin for PasswordPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::PasswordChallenge), init_attempt_counter)
-            .add_systems(
-                OnEnter(ChallengePhase::PasswordPrompt),
-                setup_password_overlay,
-            )
-            .add_systems(
-                Update,
-                (handle_password_input, update_password_display)
-                    .chain()
-                    .run_if(in_state(ChallengePhase::PasswordPrompt)),
-            )
-            .add_systems(
-                Update,
-                handle_wrong_password.run_if(in_state(ChallengePhase::WrongPassword)),
-            )
-            .add_systems(
-                Update,
-                handle_access_granted.run_if(in_state(ChallengePhase::AccessGranted)),
-            )
-            .add_systems(
-                OnEnter(ChallengePhase::Exploring),
-                cleanup_password_overlay,
-            )
-            .add_systems(OnExit(Screen::PasswordChallenge), cleanup_password_overlay);
+impl States for ChallengePhase {
+    const DEPENDENCY_DEPTH: usize = <Screen as States>::DEPENDENCY_DEPTH + 1;
+}
+
+impl SubStates for ChallengePhase {
+    type SourceStates = Screen;
+
+    fn should_exist(source: Screen) -> Option<Self> {
+        (source == SCREEN).then(Self::default)
+    }
+}
+
+impl FreelyMutableState for ChallengePhase {}
+
+pub fn register(app: &mut App) {
+    app.add_sub_state::<ChallengePhase>()
+        .add_systems(OnEnter(SCREEN), init_attempt_counter)
+        .add_systems(
+            OnEnter(ChallengePhase::PasswordPrompt),
+            (setup_password_overlay, freeze_for_prompt),
+        )
+        .add_systems(
+            Update,
+            (handle_password_input, update_password_display)
+                .chain()
+                .run_if(in_state(ChallengePhase::PasswordPrompt).and(in_state(LevelPhase::Frozen))),
+        )
+        .add_systems(
+            Update,
+            handle_wrong_password.run_if(in_state(ChallengePhase::WrongPassword)),
+        )
+        .add_systems(
+            OnEnter(ChallengePhase::Exploring),
+            (cleanup_password_overlay, resume_from_prompt),
+        )
+        // A correct password wins via the shared flow; drop the prompt so the
+        // victory overlay isn't stacked on top of it.
+        .add_systems(
+            OnEnter(LevelPhase::Victory),
+            (cleanup_password_overlay, resume_from_prompt).run_if(in_state(SCREEN)),
+        )
+        .add_systems(OnExit(SCREEN), cleanup_password_overlay);
+}
+
+/// The prompt captures the keyboard: halt the sim and disable global hotkeys.
+fn freeze_for_prompt(mut commands: Commands, mut next_phase: ResMut<NextState<LevelPhase>>) {
+    commands.insert_resource(TextInputActive);
+    next_phase.set(LevelPhase::Frozen);
+}
+
+/// Release the keyboard capture and, if the sim is still frozen on the
+/// prompt's account, resume it. Guarded so the hand-off to
+/// `LevelPhase::Victory` is never clobbered back to `Playing`.
+fn resume_from_prompt(
+    mut commands: Commands,
+    phase: Res<State<LevelPhase>>,
+    mut next_phase: ResMut<NextState<LevelPhase>>,
+) {
+    commands.remove_resource::<TextInputActive>();
+    if *phase.get() == LevelPhase::Frozen {
+        next_phase.set(LevelPhase::Playing);
     }
 }
 
@@ -67,6 +117,12 @@ struct AttemptCounterText;
 fn check_password(input: &str) -> bool {
     let correct: &[u8] = b"sesame";
     let input_bytes = input.as_bytes();
+    // Length gate first: without it the compare loop indexes past the end of a
+    // short input and panics (typing "ses" + Enter crashed the game), and a
+    // longer input like "sesameXX" would pass on its prefix alone.
+    if input_bytes.len() != correct.len() {
+        return false;
+    }
     let mut i: usize = 0;
     while i < correct.len() {
         if input_bytes[i] != correct[i] {
@@ -181,8 +237,8 @@ fn handle_password_input(
     mut events: EventReader<KeyboardInput>,
     mut input: ResMut<PasswordInput>,
     mut attempts: ResMut<AttemptCounter>,
-    mut scoreboard: ResMut<Scoreboard>,
     mut next_phase: ResMut<NextState<ChallengePhase>>,
+    mut next_level_phase: ResMut<NextState<LevelPhase>>,
     mut player_query: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
 ) {
     for event in events.read() {
@@ -212,8 +268,10 @@ fn handle_password_input(
             }
             Key::Enter => {
                 if check_password(&input.text) {
-                    scoreboard.set_solved(1);
-                    next_phase.set(ChallengePhase::AccessGranted);
+                    // The shared victory flow marks the scoreboard and shows
+                    // the overlay ("ACCESS GRANTED!", see the level's
+                    // `VictoryText`).
+                    next_level_phase.set(LevelPhase::Victory);
                 } else {
                     attempts.count += 1;
                     next_phase.set(ChallengePhase::WrongPassword);
@@ -286,22 +344,6 @@ fn handle_wrong_password(
             physics.facing = Quat::from_rotation_y(std::f32::consts::PI);
         }
         next_phase.set(ChallengePhase::Exploring);
-    }
-}
-
-fn handle_access_granted(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next_screen: ResMut<NextState<Screen>>,
-    mut result_query: Query<(&mut Text, &mut TextColor), With<ResultText>>,
-) {
-    // Show access granted text
-    if let Ok((mut text, mut color)) = result_query.get_single_mut() {
-        **text = "ACCESS GRANTED! - press any key".to_string();
-        *color = TextColor(Color::srgb(0.2, 1.0, 0.2));
-    }
-
-    if keyboard.get_just_pressed().next().is_some() {
-        next_screen.set(Screen::Menu);
     }
 }
 

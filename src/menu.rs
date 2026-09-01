@@ -1,6 +1,7 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
+use crate::levels;
 use crate::{Screen, Scoreboard};
 
 pub struct MenuPlugin;
@@ -30,6 +31,9 @@ struct MenuScreen;
 #[derive(Component)]
 struct ScoreboardText;
 
+#[derive(Component)]
+struct ShortcutHintText;
+
 /// The internal level id (1-5, 13-15) the button launches.
 #[derive(Component)]
 struct ChallengeButton(u32);
@@ -50,59 +54,25 @@ struct MenuSelection(Option<usize>);
 #[derive(Resource)]
 struct MenuNavCooldown(f32);
 
-/// Regular levels: (internal id, name).
-const REGULAR_LEVELS: [(u32, &str); 5] = [
-    (1, "The Password Gate"),
-    (2, "The Cannon Gauntlet"),
-    (3, "The Countdown"),
-    (4, "The Invisible Maze"),
-    (5, "The Rigged Race"),
-];
-
-/// Hidden easter-egg levels: (internal id = display number, name).
-const HIDDEN_LEVELS: [(u32, &str); 3] = [
-    (101, "The Hill Fortress"),
-    (102, "The Rolling Meadow"),
-    (103, "The Indoor Waterpark"),
-];
-
-pub(crate) fn screen_for_level(level: u32) -> Option<Screen> {
-    match level {
-        1 => Some(Screen::PasswordChallenge),
-        2 => Some(Screen::CannonChallenge),
-        3 => Some(Screen::CountdownChallenge),
-        4 => Some(Screen::MazeChallenge),
-        5 => Some(Screen::RaceChallenge),
-        101 => Some(Screen::HillChallenge),
-        102 => Some(Screen::MeadowChallenge),
-        103 => Some(Screen::WaterparkChallenge),
-        _ => None,
-    }
-}
-
-/// Ordered list of the level ids the player can currently pick.
+/// Ordered list of the level ids the player can currently pick. Sourced from
+/// the roster in `src/levels.rs` — the menu never keeps its own level table.
 pub(crate) fn visible_levels(revealed: bool) -> Vec<u32> {
-    let mut v: Vec<u32> = REGULAR_LEVELS.iter().map(|(l, _)| *l).collect();
-    if revealed {
-        v.extend(HIDDEN_LEVELS.iter().map(|(l, _)| *l));
-    }
-    v
+    levels::visible(revealed).map(|l| l.id).collect()
 }
 
+/// Solved / total for the scoreboard line. Hidden levels only join the
+/// denominator once revealed, so the menu doesn't advertise their existence.
 fn solved_and_total(scoreboard: &Scoreboard, revealed: bool) -> (u32, u32) {
-    let regular = REGULAR_LEVELS
-        .iter()
-        .filter(|(l, _)| scoreboard.is_solved(*l))
+    let solved = levels::visible(revealed)
+        .filter(|l| scoreboard.is_solved(l.id))
         .count() as u32;
-    if revealed {
-        let hidden = HIDDEN_LEVELS
-            .iter()
-            .filter(|(l, _)| scoreboard.is_solved(*l))
-            .count() as u32;
-        (regular + hidden, 8)
-    } else {
-        (regular, 5)
-    }
+    (solved, levels::visible_count(revealed))
+}
+
+/// The keyboard-shortcut hint line, sized to the roster (digits only go to 9).
+fn shortcut_hint(revealed: bool) -> String {
+    let n = levels::visible_count(revealed).min(9);
+    format!("Press 1-{} or click to start  |  D-pad + A on gamepad", n)
 }
 
 fn button_colors(solved: bool) -> (Color, Color) {
@@ -120,6 +90,9 @@ fn setup_menu(
 ) {
     commands.insert_resource(MenuSelection(None));
     commands.insert_resource(MenuNavCooldown(0.0));
+    // Levels each set their own ClearColor and it is global state; without this
+    // the menu keeps the sky of whichever level was played last.
+    commands.insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.1)));
     commands.spawn((Camera2d, MenuScreen));
 
     let (solved, total) = solved_and_total(&scoreboard, revealed.0);
@@ -168,27 +141,25 @@ fn setup_menu(
                     ..default()
                 })
                 .with_children(|grid| {
-                    for (level, name) in REGULAR_LEVELS.iter() {
-                        spawn_level_button(grid, *level, *level, name, scoreboard.is_solved(*level), false, true);
-                    }
-                    for (level, name) in HIDDEN_LEVELS.iter() {
+                    for l in levels::LEVELS {
                         spawn_level_button(
                             grid,
-                            *level,
-                            *level,
-                            name,
-                            scoreboard.is_solved(*level),
-                            true,
-                            revealed.0,
+                            l.id,
+                            l.id,
+                            l.name,
+                            scoreboard.is_solved(l.id),
+                            l.hidden,
+                            !l.hidden || revealed.0,
                         );
                     }
                 });
 
             // Hint
             parent.spawn((
-                Text::new("Press 1-5 or click to start  |  D-pad + A on gamepad"),
+                Text::new(shortcut_hint(revealed.0)),
                 TextFont { font_size: 16.0, ..default() },
                 TextColor(Color::srgb(0.5, 0.5, 0.5)),
+                ShortcutHintText,
                 Node { margin: UiRect::top(Val::Px(12.0)), ..default() },
             ));
         });
@@ -244,22 +215,19 @@ fn menu_keyboard(
             continue;
         }
         if let Key::Character(c) = &event.logical_key {
-            match c.as_str() {
-                "1" => start(&mut next_state, 1),
-                "2" => start(&mut next_state, 2),
-                "3" => start(&mut next_state, 3),
-                "4" => start(&mut next_state, 4),
-                "5" => start(&mut next_state, 5),
-                "?" => revealed.0 = true, // easter egg: reveal hidden levels
-                _ => {}
+            if c.as_str() == "?" {
+                revealed.0 = true; // easter egg: reveal hidden levels
+                continue;
+            }
+            // Digit N launches the Nth *visible* level, straight from the
+            // roster — no per-level shortcut table to keep in sync. Hidden
+            // levels gain shortcuts the moment they are revealed.
+            if let Ok(n) = c.as_str().parse::<usize>() {
+                if let Some(l) = n.checked_sub(1).and_then(|i| levels::visible(revealed.0).nth(i)) {
+                    next_state.set(l.screen());
+                }
             }
         }
-    }
-}
-
-fn start(next_state: &mut ResMut<NextState<Screen>>, level: u32) {
-    if let Some(screen) = screen_for_level(level) {
-        next_state.set(screen);
     }
 }
 
@@ -269,7 +237,7 @@ fn menu_button_click(
 ) {
     for (inter, btn) in &interaction {
         if *inter == Interaction::Pressed {
-            if let Some(screen) = screen_for_level(btn.0) {
+            if let Some(screen) = levels::screen_for_level(btn.0) {
                 next_state.set(screen);
             }
         }
@@ -300,7 +268,8 @@ fn update_menu_visibility(
     revealed: Res<SecretsRevealed>,
     scoreboard: Res<Scoreboard>,
     mut hidden_q: Query<&mut Node, With<HiddenButton>>,
-    mut score_q: Query<&mut Text, With<ScoreboardText>>,
+    mut score_q: Query<&mut Text, (With<ScoreboardText>, Without<ShortcutHintText>)>,
+    mut hint_q: Query<&mut Text, (With<ShortcutHintText>, Without<ScoreboardText>)>,
 ) {
     let show = revealed.0;
     for mut node in &mut hidden_q {
@@ -312,6 +281,12 @@ fn update_menu_visibility(
     let (solved, total) = solved_and_total(&scoreboard, show);
     if let Ok(mut text) = score_q.get_single_mut() {
         let s = format!("Solved: {} / {}", solved, total);
+        if **text != s {
+            **text = s;
+        }
+    }
+    if let Ok(mut text) = hint_q.get_single_mut() {
+        let s = shortcut_hint(show);
         if **text != s {
             **text = s;
         }
@@ -378,7 +353,7 @@ fn menu_gamepad(
     if confirm {
         if let Some(idx) = selection.0 {
             if let Some(&level) = visible.get(idx) {
-                if let Some(screen) = screen_for_level(level) {
+                if let Some(screen) = levels::screen_for_level(level) {
                     next_state.set(screen);
                 }
             }

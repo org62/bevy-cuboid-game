@@ -1,11 +1,13 @@
 ﻿use bevy::prelude::*;
 
-use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet,
-};
+use crate::level_kit::{self, GameplaySet, VictoryText};
+use crate::password::{self, ChallengePhase};
+use crate::player::{spawn_player, MovementBounds, Player};
 use crate::shared_ui;
-use crate::{ChallengePhase, GamePaused, Screen, Scoreboard};
+use crate::{GamePaused, Screen, Scoreboard};
+
+pub const ID: u32 = 1;
+pub(crate) const SCREEN: Screen = Screen::Level(ID);
 
 const ALLOWED_MIN: Vec2 = Vec2::new(-6.0, -5.0);
 const ALLOWED_MAX: Vec2 = Vec2::new(6.0, 5.0);
@@ -27,37 +29,22 @@ Approach 2 - breakpoint on the symbol (quick, but fragile):
 2) Inspect the local \"correct\" - it is b\"sesame\".
 3) Type \"sesame\". Note: a stripped or optimized build may not keep the symbol, which is why Approach 1 is preferred.";
 
-pub struct Level1Plugin;
-
-impl Plugin for Level1Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::PasswordChallenge), setup_world)
-            .add_systems(
-                Update,
-                (
-                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
-                    player_movement.in_set(PlayerMovementSet),
-                    detect_zone,
-                )
-                    .run_if(in_state(ChallengePhase::Exploring)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(ChallengePhase::Exploring)),
-            )
-            .add_systems(
-                Update,
-                (
-                    shared_ui::follow_camera_system,
-                    animate_player,
-                    animate_barriers,
-                    shared_ui::hint_tutorial_controls,
-                )
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::PasswordChallenge)),
-            )
-            .add_systems(OnExit(Screen::PasswordChallenge), cleanup_world);
-    }
+pub fn register(app: &mut App) {
+    password::register(app);
+    app.add_systems(OnEnter(SCREEN), setup_world)
+        .add_systems(
+            Update,
+            detect_zone
+                .in_set(GameplaySet::Logic)
+                .run_if(in_state(ChallengePhase::Exploring)),
+        )
+        .add_systems(
+            Update,
+            animate_barriers
+                .in_set(GameplaySet::Logic)
+                .run_if(in_state(SCREEN)),
+        )
+        .add_systems(OnExit(SCREEN), level_kit::despawn_level::<WorldEntity>);
 }
 
 // --- Components ---
@@ -88,9 +75,10 @@ fn setup_world(
     scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.55, 0.75, 0.95)));
+    commands.insert_resource(VictoryText::new("ACCESS GRANTED!"));
     commands.insert_resource(BarrierState {
-        lowered: scoreboard.is_solved(1),
-        offset_y: if scoreboard.is_solved(1) { -1.5 } else { 0.0 },
+        lowered: scoreboard.is_solved(ID),
+        offset_y: if scoreboard.is_solved(ID) { -1.5 } else { 0.0 },
     });
 
     // Main ground (pastel green)
@@ -105,7 +93,7 @@ fn setup_world(
     ));
 
     // Restricted zone ground
-    let zone_color = if scoreboard.is_solved(1) {
+    let zone_color = if scoreboard.is_solved(ID) {
         Color::srgb(0.35, 0.7, 0.35)
     } else {
         Color::srgb(0.7, 0.25, 0.2)
@@ -204,7 +192,7 @@ fn spawn_barriers(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     scoreboard: &Res<Scoreboard>,
 ) {
-    if scoreboard.is_solved(1) {
+    if scoreboard.is_solved(ID) {
         return;
     }
 
@@ -260,7 +248,7 @@ fn detect_zone(
     if game_paused.0 {
         return;
     }
-    if scoreboard.is_solved(1) {
+    if scoreboard.is_solved(ID) {
         return;
     }
     let Ok(transform) = player_query.get_single() else {
@@ -282,7 +270,7 @@ fn animate_barriers(
     mut materials: ResMut<Assets<StandardMaterial>>,
     zone_mat: Res<ZoneGroundMaterial>,
 ) {
-    if !scoreboard.is_solved(1) || barrier_state.lowered {
+    if !scoreboard.is_solved(ID) || barrier_state.lowered {
         return;
     }
 
@@ -307,8 +295,3 @@ fn animate_barriers(
     }
 }
 
-fn cleanup_world(mut commands: Commands, query: Query<Entity, With<WorldEntity>>) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
-}

@@ -6,6 +6,8 @@ use crate::level101::HillState;
 use crate::level2::PlayerHealth;
 use crate::level3::BombTimer;
 use crate::level5::RacerStats;
+use crate::level_kit::LevelPhase;
+use crate::password::ChallengePhase;
 use crate::player::{Player, PlayerPhysics};
 use crate::*;
 
@@ -31,35 +33,31 @@ impl Plugin for TestBotPlugin {
             )
             .add_systems(
                 Update,
-                bot_level1.run_if(in_state(Screen::PasswordChallenge)),
+                bot_level1.run_if(in_state(Screen::Level(crate::level1::ID))),
             )
             .add_systems(
                 Update,
-                bot_level2.run_if(in_state(Screen::CannonChallenge)),
+                bot_level2.run_if(in_state(Screen::Level(crate::level2::ID))),
             )
             .add_systems(
                 Update,
-                bot_level3.run_if(in_state(Screen::CountdownChallenge)),
+                bot_level3.run_if(in_state(Screen::Level(crate::level3::ID))),
             )
             .add_systems(
                 Update,
-                bot_level4.run_if(in_state(Screen::MazeChallenge)),
+                bot_level4.run_if(in_state(Screen::Level(crate::level4::ID))),
             )
             .add_systems(
                 Update,
-                bot_level5.run_if(in_state(Screen::RaceChallenge)),
+                bot_level5.run_if(in_state(Screen::Level(crate::level5::ID))),
             )
             .add_systems(
                 Update,
-                bot_level13.run_if(in_state(Screen::HillChallenge)),
+                bot_level13.run_if(in_state(Screen::Level(crate::level101::ID))),
             )
             .add_systems(
                 Update,
-                bot_level102.run_if(in_state(Screen::MeadowChallenge)),
-            )
-            .add_systems(
-                Update,
-                bot_level103.run_if(in_state(Screen::WaterparkChallenge)),
+                bot_level103.run_if(in_state(Screen::Level(crate::level103::ID))),
             );
     }
 }
@@ -290,7 +288,7 @@ fn bot_menu_system(
         5 => ('5', KeyCode::Digit5),
         // Hidden levels have no keyboard shortcut — switch the state directly.
         level => {
-            if let Some(screen) = crate::menu::screen_for_level(level) {
+            if let Some(screen) = crate::levels::screen_for_level(level) {
                 next_screen.set(screen);
                 bot.enter_level();
             }
@@ -317,12 +315,15 @@ fn bot_level1(
     mut bot: ResMut<BotState>,
     mut keyboard: ResMut<ButtonInput<KeyCode>>,
     mut writer: EventWriter<KeyboardInput>,
+    mut orbit: ResMut<shared_ui::CameraOrbit>,
     player_q: Query<&Transform, With<Player>>,
     challenge_phase: Res<State<ChallengePhase>>,
+    level_phase: Res<State<LevelPhase>>,
 ) {
     if bot.phase == BotPhase::Done {
         return;
     }
+    pin_orbit(&mut orbit);
 
     // Wait for load
     if bot.phase == BotPhase::WaitForLoad {
@@ -352,7 +353,7 @@ fn bot_level1(
             return;
         }
 
-        if *challenge_phase.get() == ChallengePhase::AccessGranted {
+        if *level_phase.get() == LevelPhase::Victory {
             release_all_movement(&mut keyboard);
             bot.phase = BotPhase::WaitForVictory;
             bot.timer = 0.5;
@@ -367,9 +368,9 @@ fn bot_level1(
         return;
     }
 
-    // Wait for victory / AccessGranted
+    // Wait for the shared victory phase
     if bot.phase == BotPhase::WaitForVictory {
-        if *challenge_phase.get() == ChallengePhase::AccessGranted {
+        if *level_phase.get() == LevelPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
@@ -400,7 +401,7 @@ fn bot_level2(
     mut bot: ResMut<BotState>,
     mut writer: EventWriter<KeyboardInput>,
     mut health: Option<ResMut<PlayerHealth>>,
-    cannon_phase: Res<State<CannonPhase>>,
+    level_phase: Res<State<LevelPhase>>,
 ) {
     if bot.phase == BotPhase::Done {
         return;
@@ -425,7 +426,7 @@ fn bot_level2(
     }
 
     if bot.phase == BotPhase::WaitForVictory {
-        if *cannon_phase.get() == CannonPhase::Victory {
+        if *level_phase.get() == LevelPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
@@ -454,7 +455,7 @@ fn bot_level3(
     mut bot: ResMut<BotState>,
     mut writer: EventWriter<KeyboardInput>,
     mut bomb: Option<ResMut<BombTimer>>,
-    countdown_phase: Res<State<CountdownPhase>>,
+    level_phase: Res<State<LevelPhase>>,
 ) {
     if bot.phase == BotPhase::Done {
         return;
@@ -469,7 +470,30 @@ fn bot_level3(
     }
 
     if bot.phase == BotPhase::ApplyHack {
-        if let Some(ref mut b) = bomb {
+        let Some(ref mut b) = bomb else { return };
+        if bot.waypoint == 0 {
+            // Pass 1: force an explosion to exercise the shared defeat
+            // overlay and the OnTransition retry reset.
+            info!("[TestBot] Level 3: Forcing an explosion to test defeat/retry");
+            b.remaining = 0.01;
+            bot.waypoint = 1;
+            return;
+        }
+        if *level_phase.get() == LevelPhase::Defeat {
+            // Dismiss (sent every frame until the overlay accepts it).
+            send_key_press(&mut writer, Key::Enter, KeyCode::Enter);
+            return;
+        }
+        if *level_phase.get() == LevelPhase::Playing && b.remaining > 1.0 {
+            // Retry landed: the hook must have reset the fuse.
+            if b.defused {
+                error!("[TestBot] Level 3: Retry did NOT reset the bomb (defused=true)");
+            } else {
+                info!(
+                    "[TestBot] Level 3: Defeat/retry OK (fuse reset to {:.1})",
+                    b.remaining
+                );
+            }
             info!("[TestBot] Level 3: Setting bomb defused = true");
             b.defused = true;
             bot.phase = BotPhase::WaitForVictory;
@@ -479,7 +503,7 @@ fn bot_level3(
     }
 
     if bot.phase == BotPhase::WaitForVictory {
-        if *countdown_phase.get() == CountdownPhase::Victory {
+        if *level_phase.get() == LevelPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
@@ -507,12 +531,14 @@ fn bot_level4(
     time: Res<Time>,
     mut bot: ResMut<BotState>,
     mut writer: EventWriter<KeyboardInput>,
+    mut orbit: ResMut<shared_ui::CameraOrbit>,
     mut player_q: Query<&mut Transform, With<Player>>,
-    maze_phase: Res<State<MazePhase>>,
+    level_phase: Res<State<LevelPhase>>,
 ) {
     if bot.phase == BotPhase::Done {
         return;
     }
+    pin_orbit(&mut orbit);
 
     if bot.phase == BotPhase::WaitForLoad {
         bot.timer -= time.delta_secs();
@@ -533,7 +559,7 @@ fn bot_level4(
     }
 
     if bot.phase == BotPhase::WaitForVictory {
-        if *maze_phase.get() == MazePhase::Victory {
+        if *level_phase.get() == LevelPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
@@ -563,12 +589,16 @@ fn bot_level5(
     mut keyboard: ResMut<ButtonInput<KeyCode>>,
     mut writer: EventWriter<KeyboardInput>,
     mut stats: Option<ResMut<RacerStats>>,
-    player_q: Query<&Transform, With<Player>>,
-    race_phase: Res<State<RacePhase>>,
+    mut orbit: ResMut<shared_ui::CameraOrbit>,
+    mut player_q: Query<&mut Transform, With<Player>>,
+    level_phase: Res<State<LevelPhase>>,
 ) {
     if bot.phase == BotPhase::Done {
         return;
     }
+    // The race movement frame must stay world-aligned for waypoint driving
+    // (and must stay pinned even if stray mouse motion reaches the window).
+    pin_orbit(&mut orbit);
 
     if bot.phase == BotPhase::WaitForLoad {
         bot.timer -= time.delta_secs();
@@ -579,28 +609,52 @@ fn bot_level5(
     }
 
     if bot.phase == BotPhase::ApplyHack {
-        if let Some(ref mut s) = stats {
-            info!("[TestBot] Level 5: Freezing AI speed to 0 so they can't finish");
-            s.ai_speed = 0.0;
+        let Some(ref mut s) = stats else { return };
+        if bot.waypoint == 0 {
+            // Pass 1: lose fast — crank the AI so they finish in about a
+            // second, exercising the shared defeat overlay and the retry
+            // back into the Frozen countdown (`DefeatText::retry_to`).
+            info!("[TestBot] Level 5: Boosting AI to lose fast (defeat/retry test)");
+            s.ai_speed = 150.0;
+            bot.waypoint = 1;
             bot.phase = BotPhase::Navigate;
-            bot.waypoint = 0;
+            return;
         }
+        // Pass 2: freeze the AI and teleport near the finish (one of the
+        // level's intended hack strategies) so the winning drive is a few
+        // units, not the whole 150-unit track.
+        info!("[TestBot] Level 5: Freezing AI and teleporting near the finish");
+        s.ai_speed = 0.0;
+        if let Ok(mut pt) = player_q.get_single_mut() {
+            pt.translation = Vec3::new(3.0, 0.0, -140.0);
+        }
+        bot.phase = BotPhase::Navigate;
         return;
     }
 
     if bot.phase == BotPhase::Navigate {
-        if *race_phase.get() == RacePhase::Victory {
+        if *level_phase.get() == LevelPhase::Victory {
             release_all_movement(&mut keyboard);
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
             return;
         }
-        if *race_phase.get() == RacePhase::Lost {
-            // Dismiss lost overlay and retry
+        if *level_phase.get() == LevelPhase::Defeat {
+            if bot.waypoint == 1 {
+                info!("[TestBot] Level 5: Lost as expected — retrying into the countdown");
+                bot.waypoint = 2;
+            }
+            release_all_movement(&mut keyboard);
+            // Dismiss (sent every frame until the overlay accepts it).
             send_key_press(&mut writer, Key::Enter, KeyCode::Enter);
+            return;
+        }
+        if *level_phase.get() == LevelPhase::Frozen && bot.waypoint == 2 {
+            // Retry re-entered the countdown: now apply the real hack.
+            info!("[TestBot] Level 5: Defeat/retry OK — back in the countdown");
+            bot.waypoint = 3;
             bot.phase = BotPhase::WaitForLoad;
             bot.timer = 0.5;
-            bot.hack_applied = false;
             return;
         }
 
@@ -615,7 +669,7 @@ fn bot_level5(
     }
 
     if bot.phase == BotPhase::WaitForVictory {
-        if *race_phase.get() == RacePhase::Victory {
+        if *level_phase.get() == LevelPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
@@ -645,7 +699,7 @@ fn bot_level13(
     mut writer: EventWriter<KeyboardInput>,
     mut hill_state: Option<ResMut<HillState>>,
     mut player_q: Query<&mut Transform, With<Player>>,
-    hill_phase: Res<State<HillPhase>>,
+    level_phase: Res<State<LevelPhase>>,
 ) {
     if bot.phase == BotPhase::Done {
         return;
@@ -675,7 +729,7 @@ fn bot_level13(
     }
 
     if bot.phase == BotPhase::WaitForVictory {
-        if *hill_phase.get() == HillPhase::Victory {
+        if *level_phase.get() == LevelPhase::Victory {
             bot.phase = BotPhase::DismissVictory;
             bot.timer = 0.5;
         }
@@ -697,129 +751,8 @@ fn bot_level13(
     }
 }
 
-// ─── Level 102: Rolling Meadow (terrain-collision probe walk) ───
-//
-// Walks straight across the rolling heightfield and asserts the physics stays
-// sane: the player must never sink below the underground floor, and while
-// continuously grounded the per-frame vertical step must respect the shared
-// terrain easing rate (a violation means grounded step transitions regressed
-// to teleporting).
-
 /// Per-level probe timeout, in virtual seconds (8 wall-clock seconds).
 const PROBE_TIMEOUT: f32 = 8.0 * BOT_TIME_SPEED;
-
-struct MeadowProbe {
-    prev: Option<(f32, bool)>, // (y, grounded) last frame
-    min_y: f32,
-    max_grounded_step: f32,
-    step_violations: u32,
-    elapsed: f32,
-}
-
-impl Default for MeadowProbe {
-    fn default() -> Self {
-        Self {
-            prev: None,
-            min_y: f32::MAX, // no sample yet — 0.0 would read as a real low point
-            max_grounded_step: 0.0,
-            step_violations: 0,
-            elapsed: 0.0,
-        }
-    }
-}
-
-fn bot_level102(
-    time: Res<Time>,
-    mut bot: ResMut<BotState>,
-    mut keyboard: ResMut<ButtonInput<KeyCode>>,
-    mut writer: EventWriter<KeyboardInput>,
-    mut orbit: ResMut<shared_ui::CameraOrbit>,
-    config: Option<Res<crate::terrain::TerrainConfig>>,
-    player_q: Query<(&Transform, &PlayerPhysics), With<Player>>,
-    mut probe: Local<MeadowProbe>,
-) {
-    if bot.phase == BotPhase::Done {
-        return;
-    }
-    let dt = time.delta_secs();
-    pin_orbit(&mut orbit);
-
-    if bot.phase == BotPhase::WaitForLoad {
-        bot.timer -= dt;
-        if bot.timer <= 0.0 {
-            info!("[TestBot] Level 102: Walking across the meadow (terrain probe)");
-            *probe = MeadowProbe::default();
-            bot.phase = BotPhase::Navigate;
-        }
-        return;
-    }
-
-    if bot.phase == BotPhase::Navigate {
-        let Ok((tf, physics)) = player_q.get_single() else { return };
-        // Assert against the level's actual tuning, not a re-hardcoded copy.
-        let Some(cfg) = config.as_deref() else { return };
-        let y = tf.translation.y;
-        probe.elapsed += dt;
-        probe.min_y = probe.min_y.min(y);
-
-        // Grounded->grounded frames may move vertically at most the easing
-        // rate — landings/falls are excluded.
-        if let Some((prev_y, prev_grounded)) = probe.prev {
-            if prev_grounded && physics.grounded {
-                let step = (y - prev_y).abs();
-                probe.max_grounded_step = probe.max_grounded_step.max(step);
-                if step > cfg.step_ease_rate * dt + 0.05 {
-                    probe.step_violations += 1;
-                }
-            }
-        }
-        probe.prev = Some((y, physics.grounded));
-
-        let reached = navigate_toward(
-            &mut keyboard,
-            tf.translation,
-            Vec3::new(10.0, 0.0, -35.0),
-            2.0,
-        );
-        // Dropping deep underground (well past any walkable dip, halfway to
-        // the void floor) means we fell into a designed pit hole — the only
-        // way out is the distant climb-out beacon, so end the probe there;
-        // the terrain assertions above already covered the walked part.
-        let in_pit = y < cfg.floor_y * 0.5;
-        let timed_out = probe.elapsed > PROBE_TIMEOUT;
-        if reached || timed_out || in_pit {
-            release_all_movement(&mut keyboard);
-            if probe.step_violations > 0 || probe.min_y < cfg.floor_y - 0.5 {
-                error!(
-                    "[TestBot] Level 102 probe FAILED: min_y={:.2} step_violations={} max_grounded_step={:.3}",
-                    probe.min_y, probe.step_violations, probe.max_grounded_step
-                );
-            } else if in_pit {
-                info!(
-                    "[TestBot] Level 102 probe OK (dropped underground at x={:.1} z={:.1} after {:.1}s — pit hole expected there): max_grounded_step={:.3}",
-                    tf.translation.x, tf.translation.z, probe.elapsed, probe.max_grounded_step
-                );
-            } else if timed_out {
-                warn!(
-                    "[TestBot] Level 102 probe timed out before crossing (min_y={:.2}) — player likely stuck",
-                    probe.min_y
-                );
-            } else {
-                info!(
-                    "[TestBot] Level 102 probe OK: crossed the meadow, min_y={:.2}, max_grounded_step={:.3}",
-                    probe.min_y, probe.max_grounded_step
-                );
-            }
-            bot.phase = BotPhase::ReturnToMenu;
-            bot.timer = 0.3;
-        }
-        return;
-    }
-
-    if bot.phase == BotPhase::ReturnToMenu {
-        tick_return_to_menu(&mut bot, dt, &mut writer);
-    }
-}
 
 // ─── Level 103: Waterpark (deck → slide → pool run) ───
 //

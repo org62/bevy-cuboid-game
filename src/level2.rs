@@ -1,12 +1,12 @@
-﻿use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
-use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet, PlayerPhysics,
-};
+use crate::level_kit::{self, DefeatText, GameplaySet, LevelPhase, VictoryText};
+use crate::player::{spawn_player, MovementBounds, Player, PlayerPhysics};
 use crate::shared_ui;
-use crate::{CannonPhase, GamePaused, Screen, Scoreboard};
+use crate::{GamePaused, Screen};
+
+pub const ID: u32 = 2;
+const SCREEN: Screen = Screen::Level(ID);
 
 /// Long-form walkthrough shown in the tutorial modal (opened with T).
 const HEALTH_TUTORIAL: &str = "\
@@ -23,46 +23,35 @@ Approach 2 - breakpoint on the check:
 2) Inspect the PlayerHealth argument - current is an f32.
 3) Set current = 100.0 and continue.";
 
-pub struct Level2Plugin;
-
-impl Plugin for Level2Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::CannonChallenge), setup_cannon_arena)
-            .add_systems(
-                Update,
-                (
-                    shared_ui::update_camera_orbit.before(PlayerMovementSet),
-                    player_movement.in_set(PlayerMovementSet),
-                    cannon_playing_update,
-                )
-                    .chain()
-                    .run_if(in_state(CannonPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                (
-                    animate_player,
-                    cannon_visual_update,
-                    shared_ui::follow_camera_system,
-                    shared_ui::hint_tutorial_controls,
-                )
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::CannonChallenge)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(CannonPhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                handle_victory.run_if(in_state(CannonPhase::Victory)),
-            )
-            .add_systems(
-                Update,
-                handle_death.run_if(in_state(CannonPhase::Dead)),
-            )
-            .add_systems(OnExit(Screen::CannonChallenge), cleanup_cannon);
-    }
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_cannon_arena)
+        .add_systems(
+            Update,
+            cannon_playing_update
+                .in_set(GameplaySet::Logic)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+        .add_systems(
+            Update,
+            cannon_visual_update
+                .in_set(GameplaySet::Logic)
+                .run_if(in_state(SCREEN)),
+        )
+        // On death the incoming volley despawns with the overlay up; on
+        // victory it despawns so the frozen scene isn't mid-barrage.
+        .add_systems(
+            OnEnter(LevelPhase::Defeat),
+            clear_projectiles.run_if(in_state(SCREEN)),
+        )
+        .add_systems(
+            OnEnter(LevelPhase::Victory),
+            clear_projectiles.run_if(in_state(SCREEN)),
+        )
+        .add_systems(
+            OnTransition { exited: LevelPhase::Defeat, entered: LevelPhase::Playing },
+            reset_after_death.run_if(in_state(SCREEN)),
+        )
+        .add_systems(OnExit(SCREEN), level_kit::despawn_level::<CannonEntity>);
 }
 
 // --- Components ---
@@ -165,9 +154,10 @@ fn setup_cannon_arena(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    _scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.45, 0.55, 0.65)));
+    commands.insert_resource(VictoryText::with_subtitle("VICTORY!", "HP reached 100!"));
+    commands.insert_resource(DefeatText::new("YOU DIED"));
     commands.insert_resource(PlayerHealth::default());
     commands.insert_resource(FireTimer {
         timer: Timer::from_seconds(FIRE_INTERVAL, TimerMode::Repeating),
@@ -352,7 +342,7 @@ fn spawn_health_cubes(
     }
 }
 
-// --- Single combined gameplay system (runs during CannonPhase::Playing) ---
+// --- Single combined gameplay system (runs while Playing) ---
 
 #[allow(clippy::too_many_arguments)]
 fn cannon_playing_update(
@@ -361,7 +351,7 @@ fn cannon_playing_update(
     mut health: ResMut<PlayerHealth>,
     mut fire_timer: ResMut<FireTimer>,
     proj_assets: Res<ProjectileAssets>,
-    mut next_phase: ResMut<NextState<CannonPhase>>,
+    mut next_phase: ResMut<NextState<LevelPhase>>,
     player_q: Query<
         &Transform,
         (With<Player>, Without<CannonPivot>, Without<CannonProjectile>, Without<HealthCube>),
@@ -466,13 +456,13 @@ fn cannon_playing_update(
 
     // === Victory / death check ===
     if check_health_victory(&health) {
-        next_phase.set(CannonPhase::Victory);
+        next_phase.set(LevelPhase::Victory);
     } else if health.current <= 0.0 {
-        next_phase.set(CannonPhase::Dead);
+        next_phase.set(LevelPhase::Defeat);
     }
 }
 
-// --- Single combined visual system (runs during Screen::CannonChallenge) ---
+// --- Single combined visual system (runs for the whole screen) ---
 
 fn cannon_visual_update(
     time: Res<Time>,
@@ -506,89 +496,28 @@ fn cannon_visual_update(
     }
 }
 
-// --- Victory overlay ---
+// --- Defeat / victory hooks (overlays and dismissal are the shared flow) ---
 
-fn handle_victory(
-    mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_screen: ResMut<NextState<Screen>>,
-    mut scoreboard: ResMut<Scoreboard>,
-    overlay_query: Query<Entity, With<shared_ui::OverlayScreen>>,
-    projectile_query: Query<Entity, With<CannonProjectile>>,
-) {
-    if overlay_query.is_empty() {
-        scoreboard.set_solved(2);
-        shared_ui::spawn_victory_overlay(
-            &mut commands,
-            "VICTORY!",
-            Some("HP reached 100!"),
-            30.0,
-            "Press any key to return to menu",
-            CannonEntity,
-        );
-        for entity in &projectile_query {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        next_screen.set(Screen::Menu);
-        return;
+fn clear_projectiles(mut commands: Commands, projectile_q: Query<Entity, With<CannonProjectile>>) {
+    for entity in &projectile_q {
+        commands.entity(entity).despawn_recursive();
     }
 }
 
-// --- Death overlay ---
-
-fn handle_death(
-    mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<CannonPhase>>,
+fn reset_after_death(
     mut health: ResMut<PlayerHealth>,
     mut player_query: Query<(&mut Transform, &mut PlayerPhysics), With<Player>>,
-    overlay_query: Query<Entity, With<shared_ui::OverlayScreen>>,
-    projectile_query: Query<Entity, With<CannonProjectile>>,
 ) {
-    if overlay_query.is_empty() {
-        shared_ui::spawn_defeat_overlay(
-            &mut commands,
-            "YOU DIED",
-            52.0,
-            None,
-            0.0,
-            "Press any key to retry",
-            Color::srgba(0.2, 0.0, 0.0, 0.8),
-            CannonEntity,
-        );
-        for entity in &projectile_query {
-            commands.entity(entity).despawn_recursive();
-        }
-    }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        for entity in &overlay_query {
-            commands.entity(entity).despawn_recursive();
-        }
-        health.current = START_HP;
-        if let Ok((mut transform, mut physics)) = player_query.get_single_mut() {
-            transform.translation = PLAYER_SPAWN;
-            physics.velocity = Vec3::ZERO;
-            physics.grounded = true;
-            physics.facing = Quat::from_rotation_y(std::f32::consts::PI);
-        }
-        next_phase.set(CannonPhase::Playing);
-        return;
+    health.current = START_HP;
+    if let Ok((mut transform, mut physics)) = player_query.get_single_mut() {
+        transform.translation = PLAYER_SPAWN;
+        physics.velocity = Vec3::ZERO;
+        physics.grounded = true;
+        physics.facing = Quat::from_rotation_y(std::f32::consts::PI);
     }
 }
 
 // --- Cleanup ---
-
-fn cleanup_cannon(mut commands: Commands, query: Query<Entity, With<CannonEntity>>) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
-}
 
 #[cfg(test)]
 mod tests {

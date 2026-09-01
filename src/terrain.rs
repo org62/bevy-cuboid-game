@@ -1,13 +1,15 @@
 //! Shared terrain collision for levels with non-flat geometry.
 //!
 //! One parameterized implementation of the swept player-vs-surface collision
-//! described in CLAUDE.md, used by the hill (101), meadow (102) and waterpark
-//! (103) levels. The invariants it upholds:
+//! described in CLAUDE.md, used by the hill (101) and waterpark (103) levels. The invariants it upholds:
 //!
 //! - **Always sweep, never point-sample.** Surfaces are tested against both
 //!   the previous and current XZ position (`prev = pos - velocity * dt`), and
-//!   the vertical tolerance grows with `|vy| * dt` so fast motion cannot
-//!   tunnel between or through surfaces.
+//!   a surface the player crossed vertically during the frame catches them,
+//!   so fast motion cannot tunnel between or through surfaces.
+//! - **Never lift a player onto a surface their feet did not reach.** Support
+//!   above the feet is only granted to a grounded walker stepping up (see
+//!   [`step_up_tolerance`]).
 //! - **Never snap up while jumping.** Every snap/ease path is gated on
 //!   `velocity.y <= 0`.
 //! - **Step-down snapping** keeps a statically-grounded player glued to the
@@ -20,9 +22,10 @@
 //!   visibly pass through geometry.
 //!
 //! Levels opt in by inserting a [`TerrainConfig`] resource in their `OnEnter`
-//! setup (and removing it on `OnExit`) and registering [`terrain_collision`]
-//! after `player_movement` in their update chain. Without the resource the
-//! system is a no-op, so flat levels are unaffected.
+//! setup — that is the whole opt-in, since `level_kit::install` already
+//! registers [`terrain_collision`] in `GameplaySet::Collision` for every
+//! level and the resource is swept centrally on menu return. Without the
+//! resource the system is a no-op, so flat levels are unaffected.
 
 use bevy::prelude::*;
 
@@ -106,16 +109,14 @@ pub struct ColumnPushout {
     pub base_y: f32,
 }
 
-/// Per-level tuning for [`terrain_collision`]. Insert on level enter, remove
-/// on exit.
+/// Per-level tuning for [`terrain_collision`]. Insert on level enter; the
+/// level_kit sweep removes it on menu return.
 #[derive(Resource, Clone)]
 pub struct TerrainConfig {
     /// Void sentinel strictly below every real surface.
     pub floor_y: f32,
     /// Max step height a grounded player walks up (tolerance slack).
     pub step_up_limit: f32,
-    /// Cap on the swept tolerance `|vy| * dt + step_up_limit`.
-    pub tolerance_max: f32,
     /// Max ledge drop that step-down snapping bridges (CLAUDE.md: ~1.5).
     pub step_down_limit: f32,
     /// Vertical speed (units/s) for eased grounded step transitions.
@@ -135,7 +136,6 @@ impl TerrainConfig {
         Self {
             floor_y,
             step_up_limit: 0.5,
-            tolerance_max: 2.0,
             step_down_limit: 1.5,
             step_ease_rate: 15.0,
             pushout_margin: 0.3,
@@ -155,10 +155,34 @@ pub struct SupportScan {
     pub any_surface: f32,
 }
 
+/// How far **above** the player's feet a surface may sit and still count as
+/// support this frame.
+///
+/// Only a *grounded* walker steps up onto something above their feet — that is
+/// what `step_up_limit` means. An airborne player gets zero: they have to
+/// actually reach a surface to stand on it.
+///
+/// This used to be `|vy| * dt + step_up_limit` for **any** descending player,
+/// capped at 2.0. That magnets a fast faller up to ~0.8 units onto ledges
+/// their feet never reached, and at a jump's apex (`vy ≈ 0`) it snaps them
+/// onto any platform within the full `step_up_limit` — the player visibly
+/// jumps short and gets dragged up onto the higher tier anyway. Do not
+/// reintroduce it: the swept `crossed` test in [`find_support`] already covers
+/// the fall-through case it was added for, and it is gated on `prev.y` having
+/// been above the surface, so it can never lift a player who jumped short.
+pub fn step_up_tolerance(vy: f32, was_airborne: bool, step_up_limit: f32) -> f32 {
+    if vy <= 0.0 && !was_airborne {
+        step_up_limit
+    } else {
+        0.0
+    }
+}
+
 /// Scan `(min, max, y)` surfaces for the best support, per the swept rules:
 /// a surface counts if its XZ bounds contain the previous **or** current
-/// position, and it either sits within `tolerance` of the player (at the
-/// current XZ) or was vertically crossed during the frame while descending.
+/// position, and it either sits at/below the player's feet (plus `tolerance`,
+/// the grounded step-up slack) or was vertically crossed during the frame
+/// while descending.
 pub fn find_support(
     cur: Vec3,
     prev: Vec3,
@@ -193,7 +217,7 @@ pub fn find_support(
 }
 
 /// What the vertical resolution decided to do with the player.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VerticalAction {
     /// Ground instantly at this height (landing, tunnel catch, phase rescue).
     SnapTo(f32),
@@ -207,6 +231,13 @@ pub enum VerticalAction {
 
 /// Decide the vertical resolution for this frame. Pure logic mirror of the
 /// snap rules in CLAUDE.md plus the easing rule (ease only grounded steps).
+///
+/// `rescue_from_below` enables the phase-through rescue and must only be set
+/// for heightfield levels (see [`ColumnPushout`]), where every surface is a
+/// solid column down to the base and there is therefore no legal space
+/// underneath one. On a level built from platforms, air below a surface is
+/// exactly where a jump that fell short leaves the player, and rescuing them
+/// there teleports them up onto a ledge their feet never reached.
 pub fn resolve_vertical(
     y: f32,
     prev_y: f32,
@@ -215,12 +246,16 @@ pub fn resolve_vertical(
     scan: &SupportScan,
     floor_y: f32,
     step_down_limit: f32,
+    rescue_from_below: bool,
 ) -> VerticalAction {
     let mut best_y = scan.best_y;
-    // Fallback: nothing within tolerance but there IS a surface here — the
-    // player has phased below all surfaces. Rescue them upward.
+    // Fallback: nothing to stand on but there IS a surface overhead at this
+    // XZ. In a heightfield that means the player has phased inside a column —
+    // rescue them upward. Anywhere else it just means they are in mid-air
+    // under a platform, which is not an error.
     let mut phased = false;
-    if best_y <= floor_y + 0.1 && scan.any_surface > floor_y + 0.1 && vy <= 0.0 {
+    if rescue_from_below && best_y <= floor_y + 0.1 && scan.any_surface > floor_y + 0.1 && vy <= 0.0
+    {
         best_y = scan.any_surface;
         phased = true;
     }
@@ -293,6 +328,22 @@ impl SolidBlock {
     }
 }
 
+/// What [`terrain_collision`] did to the player last frame, and with which
+/// numbers. Diagnostics only — nothing in the sim reads it — but it is the
+/// honest source for "did the engine ease or snap?", which the F3 overlay and
+/// the test bot's terrain probes both need. Differencing the transform across
+/// frames cannot tell those apart, and a swept catch legitimately moves the
+/// player further in one frame than the ease rate allows.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct TerrainDiag {
+    /// Resolution applied on the last frame collision ran (`None` until then).
+    pub last_action: Option<VerticalAction>,
+    /// Vertical distance that resolution moved the player.
+    pub last_dy: f32,
+    /// The frame delta that step was taken over.
+    pub last_dt: f32,
+}
+
 // --- The collision system ---
 
 /// Push the player horizontally out of the XZ box `min..max` (inflated by
@@ -344,6 +395,7 @@ pub fn terrain_collision(
         (&mut Transform, &mut PlayerPhysics, &mut SquashState),
         (With<Player>, Without<TerrainPhysicsExempt>),
     >,
+    mut diag: ResMut<TerrainDiag>,
     time: Res<Time>,
 ) {
     let Some(cfg) = config else { return };
@@ -431,11 +483,7 @@ pub fn terrain_collision(
     let cur = transform.translation;
     let prev = cur - physics.velocity * dt;
     let vy = physics.velocity.y;
-    let tolerance = if vy <= 0.0 {
-        (vy.abs() * dt + cfg.step_up_limit).min(cfg.tolerance_max)
-    } else {
-        0.0
-    };
+    let tolerance = step_up_tolerance(vy, was_airborne, cfg.step_up_limit);
 
     let scan = find_support(
         cur,
@@ -446,7 +494,7 @@ pub fn terrain_collision(
         surfaces.iter().map(|s| (s.min, s.max, s.y)),
     );
 
-    match resolve_vertical(
+    let action = resolve_vertical(
         cur.y,
         prev.y,
         vy,
@@ -454,7 +502,10 @@ pub fn terrain_collision(
         &scan,
         cfg.floor_y,
         cfg.step_down_limit,
-    ) {
+        cfg.column_pushout.is_some(),
+    );
+    let y_before = transform.translation.y;
+    match action {
         VerticalAction::SnapTo(y) => {
             transform.translation.y = y;
             physics.velocity.y = 0.0;
@@ -475,6 +526,12 @@ pub fn terrain_collision(
         }
         VerticalAction::Keep => {}
     }
+
+    *diag = TerrainDiag {
+        last_action: Some(action),
+        last_dy: transform.translation.y - y_before,
+        last_dt: dt,
+    };
 }
 
 #[cfg(test)]
@@ -524,6 +581,87 @@ mod tests {
         assert_eq!(scan.best_y, FLOOR, "surface beyond tolerance is not");
     }
 
+    // --- step_up_tolerance ---
+
+    #[test]
+    fn only_a_grounded_walker_gets_step_up_slack() {
+        // Grounded and settled: full step-up slack, so walking into a small
+        // riser steps up onto it.
+        assert_eq!(step_up_tolerance(0.0, false, 0.5), 0.5);
+        // Airborne, however fast: no upward slack at all.
+        assert_eq!(step_up_tolerance(-20.0, true, 0.5), 0.0);
+        assert_eq!(step_up_tolerance(0.0, true, 0.5), 0.0);
+        // Rising: never, grounded or not.
+        assert_eq!(step_up_tolerance(9.0, false, 0.5), 0.0);
+        assert_eq!(step_up_tolerance(9.0, true, 0.5), 0.0);
+    }
+
+    #[test]
+    fn jump_that_falls_short_of_a_ledge_is_not_lifted_onto_it() {
+        // Ledge top at y=1.4. The player jumped from y=0, peaked at 1.2 and is
+        // now falling back down inside the ledge's XZ footprint — their feet
+        // never got above the ledge. They must keep falling, not be magneted
+        // up onto it.
+        let s = [surf((-5.0, -5.0), (5.0, 5.0), 1.4)];
+        let cur = Vec3::new(0.0, 1.1, 0.0);
+        let prev = Vec3::new(0.0, 1.2, 0.0);
+        let tol = step_up_tolerance(-2.0, true, 0.5);
+        let scan = find_support(cur, prev, -2.0, tol, FLOOR, s);
+        assert_eq!(scan.best_y, FLOOR, "airborne player must not acquire a ledge above their feet");
+        assert_eq!(
+            resolve_vertical(cur.y, prev.y, -2.0, true, &scan, FLOOR, 1.5, false),
+            VerticalAction::Unground
+        );
+    }
+
+    #[test]
+    fn fast_fall_past_a_surface_still_catches_it() {
+        // The case the old |vy| * dt tolerance existed for: a 20 u/s fall
+        // crosses a surface within one frame. The swept `crossed` term must
+        // catch it with zero upward tolerance.
+        let s = [surf((-5.0, -5.0), (5.0, 5.0), 1.0)];
+        let prev = Vec3::new(0.0, 1.2, 0.0);
+        let cur = Vec3::new(0.0, 0.87, 0.0);
+        let tol = step_up_tolerance(-20.0, true, 0.5);
+        assert_eq!(tol, 0.0);
+        let scan = find_support(cur, prev, -20.0, tol, FLOOR, s);
+        assert_eq!(scan.best_y, 1.0, "a surface fallen past must still catch the player");
+        assert_eq!(
+            resolve_vertical(cur.y, prev.y, -20.0, true, &scan, FLOOR, 1.5, false),
+            VerticalAction::SnapTo(1.0)
+        );
+    }
+
+    #[test]
+    fn landing_squarely_on_a_surface_still_snaps() {
+        // Feet a hair above the surface at the end of a fall.
+        let s = [surf((-5.0, -5.0), (5.0, 5.0), 1.0)];
+        let cur = Vec3::new(0.0, 1.05, 0.0);
+        let prev = Vec3::new(0.0, 1.4, 0.0);
+        let tol = step_up_tolerance(-9.0, true, 0.5);
+        let scan = find_support(cur, prev, -9.0, tol, FLOOR, s);
+        assert_eq!(scan.best_y, 1.0);
+        assert_eq!(
+            resolve_vertical(cur.y, prev.y, -9.0, true, &scan, FLOOR, 1.5, false),
+            VerticalAction::SnapTo(1.0)
+        );
+    }
+
+    #[test]
+    fn grounded_walk_into_a_riser_still_steps_up() {
+        // The behaviour the slack is actually for: a settled walker meeting a
+        // 0.4 step.
+        let s = [surf((-5.0, -5.0), (5.0, 5.0), 0.4)];
+        let cur = Vec3::new(0.0, 0.0, 0.0);
+        let tol = step_up_tolerance(0.0, false, 0.5);
+        let scan = find_support(cur, cur, 0.0, tol, FLOOR, s);
+        assert_eq!(scan.best_y, 0.4);
+        assert_eq!(
+            resolve_vertical(cur.y, cur.y, 0.0, false, &scan, FLOOR, 1.5, false),
+            VerticalAction::EaseTo(0.4)
+        );
+    }
+
     #[test]
     fn any_surface_found_even_outside_tolerance() {
         // Player phased 3 units below the only surface here.
@@ -543,7 +681,7 @@ mod tests {
     #[test]
     fn airborne_landing_snaps() {
         // Falling player at/below the surface.
-        let a = resolve_vertical(0.95, 1.4, -9.0, true, &scan(1.0, 1.0), FLOOR, 1.5);
+        let a = resolve_vertical(0.95, 1.4, -9.0, true, &scan(1.0, 1.0), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::SnapTo(1.0));
     }
 
@@ -551,19 +689,19 @@ mod tests {
     fn grounded_step_up_eases() {
         // Walking into a 0.4-high step: support acquired via tolerance,
         // player below it, was grounded, vy == 0.
-        let a = resolve_vertical(1.0, 1.0, 0.0, false, &scan(1.4, 1.4), FLOOR, 1.5);
+        let a = resolve_vertical(1.0, 1.0, 0.0, false, &scan(1.4, 1.4), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::EaseTo(1.4));
     }
 
     #[test]
     fn grounded_step_down_within_limit_eases() {
-        let a = resolve_vertical(1.0, 1.0, 0.0, false, &scan(0.2, 0.2), FLOOR, 1.5);
+        let a = resolve_vertical(1.0, 1.0, 0.0, false, &scan(0.2, 0.2), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::EaseTo(0.2));
     }
 
     #[test]
     fn step_down_beyond_limit_ungrounds() {
-        let a = resolve_vertical(2.0, 2.0, 0.0, false, &scan(0.2, 0.2), FLOOR, 1.5);
+        let a = resolve_vertical(2.0, 2.0, 0.0, false, &scan(0.2, 0.2), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::Unground);
     }
 
@@ -571,27 +709,36 @@ mod tests {
     fn step_down_never_fires_into_void() {
         // No support at all (best_y == floor): walking off the last ledge
         // must unground, not snap to the void sentinel.
-        let a = resolve_vertical(0.5, 0.5, 0.0, false, &scan(FLOOR, FLOOR), FLOOR, 1.5);
+        let a = resolve_vertical(0.5, 0.5, 0.0, false, &scan(FLOOR, FLOOR), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::Unground);
     }
 
     #[test]
     fn crossed_surface_snaps_not_eases() {
         // Fast grounded slide: prev_y above the support, cur below it.
-        let a = resolve_vertical(0.6, 1.2, -0.5, false, &scan(1.0, 1.0), FLOOR, 1.5);
+        let a = resolve_vertical(0.6, 1.2, -0.5, false, &scan(1.0, 1.0), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::SnapTo(1.0));
     }
 
     #[test]
-    fn phased_below_rescue_snaps() {
-        // Nothing in tolerance, but a surface exists overhead.
-        let a = resolve_vertical(-1.0, -1.0, 0.0, false, &scan(FLOOR, 2.0), FLOOR, 1.5);
+    fn phased_below_rescue_snaps_in_heightfield_levels() {
+        // Nothing to stand on, but a surface exists overhead: inside a column.
+        let a = resolve_vertical(-1.0, -1.0, 0.0, false, &scan(FLOOR, 2.0), FLOOR, 1.5, true);
         assert_eq!(a, VerticalAction::SnapTo(2.0));
     }
 
     #[test]
+    fn being_under_a_platform_is_not_a_phase_through() {
+        // Same scan, but on a platform level: mid-air under a ledge is where a
+        // short jump legitimately leaves the player. Rescuing them here is the
+        // "dragged up onto the tier above" bug.
+        let a = resolve_vertical(-1.0, -1.0, 0.0, false, &scan(FLOOR, 2.0), FLOOR, 1.5, false);
+        assert_eq!(a, VerticalAction::Unground);
+    }
+
+    #[test]
     fn rising_player_keeps_flying() {
-        let a = resolve_vertical(1.5, 1.2, 5.0, true, &scan(1.0, 1.0), FLOOR, 1.5);
+        let a = resolve_vertical(1.5, 1.2, 5.0, true, &scan(1.0, 1.0), FLOOR, 1.5, false);
         assert_eq!(a, VerticalAction::Unground);
     }
 

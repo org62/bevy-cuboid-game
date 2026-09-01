@@ -1,12 +1,15 @@
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
+use crate::level_kit::{self, DefeatText, GameplaySet, LevelPhase, VictoryText};
 use crate::player::{
-    animate_player, escape_to_menu, player_movement, spawn_player, toggle_pause, MovementBounds,
-    Player, PlayerMovementSet, PlayerPhysics, PowerUpState,
+    escape_to_menu, spawn_player, toggle_pause, MovementBounds, Player, PlayerPhysics, PowerUpState,
 };
 use crate::shared_ui;
-use crate::{GamePaused, RacePhase, Screen, Scoreboard};
+use crate::{GamePaused, Screen, Scoreboard};
+
+pub const ID: u32 = 5;
+const SCREEN: Screen = Screen::Level(ID);
 
 const RACE_TUTORIAL: &str = "\
 You cannot out-drive the field head-on - the AI racers are faster than your top speed. But the race only cares about how far each racer is down the track, and every one of those numbers lives in memory you can reach. There are several independent ways to win; any one of them is enough.
@@ -20,45 +23,39 @@ The finish check reads your progress and returns true only at >= 0.995. Force th
 Strategy 3 - Freeze the other racers (NOP what writes their progress):
 Every frame one shared function advances all the AI down the track and updates the % you see in the STANDINGS HUD. Right-click an AI's progress value in the HUD-backed memory and 'Find what writes' to it - all three AI share the same write. NOP that write (or NOP the call to it) and the whole field stops at 0%, leaving you to drive across at your own pace.";
 
-pub struct Level5Plugin;
-
-impl Plugin for Level5Plugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::RaceChallenge), setup_race)
-            .add_systems(
-                Update,
-                countdown_update.run_if(in_state(RacePhase::Countdown)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(RacePhase::Countdown)),
-            )
-            .add_systems(
-                Update,
-                (player_movement.in_set(PlayerMovementSet), race_playing_update)
-                    .chain()
-                    .run_if(in_state(RacePhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                (animate_player, race_visual_update, shared_ui::hint_tutorial_controls)
-                    .after(PlayerMovementSet)
-                    .run_if(in_state(Screen::RaceChallenge)),
-            )
-            .add_systems(
-                Update,
-                (escape_to_menu, toggle_pause).run_if(in_state(RacePhase::Playing)),
-            )
-            .add_systems(
-                Update,
-                handle_victory.run_if(in_state(RacePhase::Victory)),
-            )
-            .add_systems(
-                Update,
-                handle_lost.run_if(in_state(RacePhase::Lost)),
-            )
-            .add_systems(OnExit(Screen::RaceChallenge), cleanup_race);
-    }
+/// The race starts in `LevelPhase::Frozen` (see `starts_frozen` in the
+/// roster): the 3-2-1 countdown runs there, with escape/pause opted back in
+/// since the shared kit only runs them while `Playing`. The chase cam is
+/// bespoke (`race_visual_update`); the camera entity carries no
+/// `FollowCamera`, so the shared follow system no-ops.
+pub fn register(app: &mut App) {
+    app.add_systems(OnEnter(SCREEN), setup_race)
+        .add_systems(
+            Update,
+            (countdown_update, escape_to_menu, toggle_pause)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Frozen)),
+        )
+        .add_systems(
+            Update,
+            race_playing_update
+                .in_set(GameplaySet::Logic)
+                .run_if(level_kit::in_phase(SCREEN, LevelPhase::Playing)),
+        )
+        .add_systems(
+            Update,
+            race_visual_update
+                .in_set(GameplaySet::Camera)
+                .run_if(in_state(SCREEN)),
+        )
+        // Retry re-enters the Frozen countdown, per `DefeatText::retry_to`.
+        .add_systems(
+            OnTransition { exited: LevelPhase::Defeat, entered: LevelPhase::Frozen },
+            reset_race.run_if(in_state(SCREEN)),
+        )
+        .add_systems(
+            OnExit(SCREEN),
+            (level_kit::despawn_level::<RaceEntity>, cleanup_race),
+        );
 }
 
 // --- Components ---
@@ -181,6 +178,11 @@ fn setup_race(
     scoreboard: Res<Scoreboard>,
 ) {
     commands.insert_resource(ClearColor(Color::srgb(0.4, 0.6, 0.85)));
+    commands.insert_resource(VictoryText::new("YOU WIN THE RACE!"));
+    commands.insert_resource(DefeatText {
+        retry_to: LevelPhase::Frozen,
+        ..DefeatText::with_subtitle("YOU LOST!", "An AI racer finished first!")
+    });
     commands.insert_resource(RacerStats::default());
     commands.insert_resource(PlayerRaceState::default());
     commands.init_resource::<RaceSeed>();
@@ -410,7 +412,7 @@ fn setup_race(
         });
 
     // Hint box + tutorial modal (hidden; H reveals the hint, T the tutorial)
-    if !scoreboard.is_solved(5) {
+    if !scoreboard.is_solved(ID) {
         shared_ui::spawn_hint_box_with_tutorial(
             &mut commands,
             "Use multiple strategies to win: teleport yourself to the finish, patch the finish criteria, or freeze the other racers.",
@@ -456,7 +458,7 @@ fn spawn_countdown_ui(commands: &mut Commands) {
 fn countdown_update(
     time: Res<Time>,
     mut countdown: ResMut<CountdownTimer>,
-    mut next_phase: ResMut<NextState<RacePhase>>,
+    mut next_phase: ResMut<NextState<LevelPhase>>,
     mut commands: Commands,
     mut text_q: Query<&mut Text, With<CountdownText>>,
     countdown_entities: Query<Entity, (With<CountdownText>, With<Node>)>,
@@ -470,7 +472,7 @@ fn countdown_update(
             for entity in &countdown_entities {
                 commands.entity(entity).despawn_recursive();
             }
-            next_phase.set(RacePhase::Playing);
+            next_phase.set(LevelPhase::Playing);
             return;
         }
         countdown.stage -= 1;
@@ -493,7 +495,7 @@ fn race_playing_update(
     mut commands: Commands,
     mut key_events: EventReader<KeyboardInput>,
     mut player_race: ResMut<PlayerRaceState>,
-    mut next_phase: ResMut<NextState<RacePhase>>,
+    mut next_phase: ResMut<NextState<LevelPhase>>,
     player_q: Query<&Transform, (With<Player>, Without<AiRacer>)>,
     mut ai_q: Query<(&AiRacer, &mut Transform), Without<Player>>,
     game_paused: Res<GamePaused>,
@@ -507,12 +509,12 @@ fn race_playing_update(
 
     update_player_progress(&player_q, &mut player_race);
     if check_race_finished(player_race.progress) {
-        next_phase.set(RacePhase::Victory);
+        next_phase.set(LevelPhase::Victory);
         return;
     }
 
     if advance_ai_racers(&stats, &mut ai_q, dt) {
-        next_phase.set(RacePhase::Lost);
+        next_phase.set(LevelPhase::Defeat);
         return;
     }
 }
@@ -629,99 +631,49 @@ fn race_visual_update(
     }
 }
 
-// --- Victory ---
+// --- Retry hook (overlays and dismissal are the shared flow) ---
 
-fn handle_victory(
+/// Reset the whole race for another attempt: fresh rules and progress, the
+/// boost easter egg revoked, the AI reseeded and everyone back on the start
+/// line, with a new countdown.
+fn reset_race(
     mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_screen: ResMut<NextState<Screen>>,
-    mut scoreboard: ResMut<Scoreboard>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
-) {
-    if overlay_q.is_empty() {
-        scoreboard.set_solved(5);
-        shared_ui::spawn_victory_overlay(
-            &mut commands,
-            "YOU WIN THE RACE!",
-            None,
-            0.0,
-            "Press any key to continue",
-            RaceEntity,
-        );
-    }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        for entity in &overlay_q {
-            commands.entity(entity).despawn_recursive();
-        }
-        next_screen.set(Screen::Menu);
-        return;
-    }
-}
-
-// --- Lost ---
-
-fn handle_lost(
-    mut commands: Commands,
-    mut events: EventReader<KeyboardInput>,
-    mut next_phase: ResMut<NextState<RacePhase>>,
     mut stats: ResMut<RacerStats>,
     mut race_seed: ResMut<RaceSeed>,
     mut player_race: ResMut<PlayerRaceState>,
     mut player_q: Query<(&mut Transform, &mut PlayerPhysics), (With<Player>, Without<AiRacer>)>,
     mut ai_q: Query<(&mut AiRacer, &mut Transform), Without<Player>>,
-    overlay_q: Query<Entity, With<shared_ui::OverlayScreen>>,
 ) {
-    if overlay_q.is_empty() {
-        shared_ui::spawn_defeat_overlay(
-            &mut commands,
-            "YOU LOST!",
-            52.0,
-            Some("An AI racer finished first!"),
-            28.0,
-            "Press any key to retry",
-            Color::srgba(0.2, 0.0, 0.0, 0.8),
-            RaceEntity,
-        );
+    *stats = RacerStats::default();
+    *player_race = PlayerRaceState::default();
+    commands.remove_resource::<PowerUpState>();
+    race_seed.0 += 1;
+    for (mut ai, mut t) in &mut ai_q {
+        ai.speed_multiplier = random_ai_multiplier(race_seed.0 * 3 + ai.lane as u32);
+        let lane_x = AI_LANE_XS[ai.lane as usize];
+        let pos = track_position(0.0, lane_x);
+        t.translation = Vec3::new(pos.x, 0.0, pos.z);
     }
-
-    for event in events.read() {
-        if !event.state.is_pressed() { continue; }
-        for entity in &overlay_q {
-            commands.entity(entity).despawn_recursive();
-        }
-        *stats = RacerStats::default();
-        *player_race = PlayerRaceState::default();
-        commands.remove_resource::<PowerUpState>();
-        race_seed.0 += 1;
-        for (mut ai, mut t) in &mut ai_q {
-            ai.speed_multiplier = random_ai_multiplier(race_seed.0 * 3 + ai.lane as u32);
-            let lane_x = AI_LANE_XS[ai.lane as usize];
-            let pos = track_position(0.0, lane_x);
-            t.translation = Vec3::new(pos.x, 0.0, pos.z);
-        }
-        if let Ok((mut t, mut p)) = player_q.get_single_mut() {
-            t.translation = PLAYER_SPAWN;
-            p.velocity = Vec3::ZERO;
-            p.grounded = true;
-        }
-        spawn_countdown_ui(&mut commands);
-        commands.insert_resource(CountdownTimer {
-            timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-            stage: 3,
-        });
-        next_phase.set(RacePhase::Countdown);
-        return;
+    if let Ok((mut t, mut p)) = player_q.get_single_mut() {
+        t.translation = PLAYER_SPAWN;
+        p.velocity = Vec3::ZERO;
+        p.grounded = true;
     }
+    spawn_countdown_ui(&mut commands);
+    commands.insert_resource(CountdownTimer {
+        timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+        stage: 3,
+    });
 }
 
 // --- Cleanup ---
 
-fn cleanup_race(mut commands: Commands, query: Query<Entity, With<RaceEntity>>) {
-    for entity in &query {
-        commands.entity(entity).despawn_recursive();
-    }
+fn cleanup_race(mut commands: Commands) {
+    // Level-private resources; the shared globals (e.g. the boost easter
+    // egg's `PowerUpState`) are swept centrally on returning to the menu.
+    commands.remove_resource::<RacerStats>();
+    commands.remove_resource::<PlayerRaceState>();
+    commands.remove_resource::<CountdownTimer>();
 }
 
 #[cfg(test)]
