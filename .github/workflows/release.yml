@@ -1,0 +1,46 @@
+# Releases are cut by tagging a commit on `main`:
+#
+#   git tag v0.1.1 && git push origin v0.1.1
+#
+# That's the whole procedure - the tag is the only source of truth for the
+# version. It runs the same build + tests as CI (with the version stamped into
+# Cargo.toml first), then publishes the binaries.
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/_build.yml
+    with:
+      # Enables version stamping and SHA256 sidecars.
+      version: ${{ github.ref_name }}
+      retention-days: 90
+
+  publish:
+    needs: build
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: bevy-cuboid-game-*
+        path: artifacts
+        merge-multiple: true
+
+    - name: Create GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: artifacts/*
+        # Anything like v0.2.0-rc.1 ships as a prerelease.
+        prerelease: ${{ contains(github.ref_name, '-') }}
+        generate_release_notes: true
+        fail_on_unmatched_files: true

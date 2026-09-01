@@ -125,7 +125,7 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Debugger Challenges".to_string(),
+                title: "bevy-cuboid-game".to_string(),
                 resolution: (800.0_f32, 500.0_f32).into(),
                 present_mode: PresentMode::Fifo,
                 // Keep the CPU at most one frame ahead of the GPU. Measured on

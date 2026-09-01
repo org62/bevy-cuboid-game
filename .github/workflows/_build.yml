@@ -1,0 +1,115 @@
+# Reusable build + test job. Called by ci.yml (every push/PR) and release.yml
+# (tag builds), so CI and releases always run the exact same steps.
+name: Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          Release version, with or without a leading "v". When set, it is stamped
+          into Cargo.toml and the artifacts get a SHA256 sidecar. Artifact names
+          are bevy-cuboid-game-<arch>.zip either way - deliberately
+          version-free, so releases/latest/download/bevy-cuboid-game-x64.zip
+          is a stable permalink.
+        type: string
+        required: false
+        default: ''
+      retention-days:
+        type: number
+        required: false
+        default: 14
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    strategy:
+      # Both arches always report; one failing arch shouldn't mask the other.
+      fail-fast: false
+      matrix:
+        arch: [ARM64, X64]
+    runs-on:
+      - self-hosted
+      - Windows
+      - ${{ matrix.arch }}
+    steps:
+    - uses: actions/checkout@v4
+
+    # The git tag is the only source of truth for the version. Cargo.toml carries
+    # the placeholder in the repo and is stamped here, before the build reads it,
+    # so the exe metadata shows the real version without anything needing to be
+    # committed at release time.
+    - name: Stamp version from tag
+      if: inputs.version != ''
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        $v = "${{ inputs.version }}" -replace '^v', ''
+        $path = "Cargo.toml"
+        # Replace only the FIRST column-0 `version = "..."`. That is the
+        # [package] one; the only other column-0 version key lives under
+        # [dependencies.smol_str], further down the file.
+        $toml = (Get-Content $path -Raw)
+        $toml = ([regex]'(?m)^version\s*=\s*"[^"]*"').Replace($toml, ('version = "{0}"' -f $v), 1)
+        [IO.File]::WriteAllText("$PWD/$path", $toml)
+        # Assert on the value cargo actually parses: a substring search over the
+        # file would still pass if the replace had landed on the wrong key.
+        $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+        if ($meta.packages[0].version -ne $v) { throw "version stamp failed" }
+        Write-Host "stamped version $v"
+        # Note: Cargo.lock is refreshed by the build below. Do not add --locked.
+
+    - name: Build
+      run: cargo build --release
+
+    # --release reuses the artifacts the build just produced; the default test
+    # profile would recompile the entire tree from scratch.
+    - name: Unit tests
+      run: cargo test --release
+
+    - name: Stage artifacts
+      shell: powershell
+      run: |
+        $ErrorActionPreference = "Stop"
+        if ("${{ matrix.arch }}" -eq "X64") { $arch = "x64" } else { $arch = "aarch64" }
+        $version = "${{ inputs.version }}" -replace '^v', ''
+
+        $exe = "target/release/bevy-cuboid-game.exe"
+        $pdb = "target/release/bevy_cuboid_game.pdb"
+        foreach ($f in @($exe, $pdb)) {
+          if (-not (Test-Path $f)) { throw "build output not found: $f" }
+        }
+
+        Remove-Item -Recurse -Force artifacts, staging -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force artifacts, staging | Out-Null
+
+        # Both files keep their original build names inside the zip. The .pdb
+        # is bevy_cuboid_game.pdb (underscores) and not a typo: rustc names the
+        # PDB after the sanitized crate name while the exe keeps the hyphenated
+        # package name, and the exe's debug directory records that exact base
+        # name - a renamed .pdb would not auto-load when a debugger attaches,
+        # which is the entire point of shipping it for this game.
+        Copy-Item $exe staging/
+        Copy-Item $pdb staging/
+
+        # Version-free on purpose: keeps the releases/latest/download/<name>
+        # permalink stable.
+        $name = "bevy-cuboid-game-$arch.zip"
+        Compress-Archive -Path staging/* -DestinationPath "artifacts/$name"
+
+        if ($version) {
+          # sha256sum-compatible sidecar: lowercase hash, two spaces, LF ending.
+          $hash = (Get-FileHash "artifacts/$name" -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$PWD/artifacts/$name.sha256", "$hash  $name`n")
+        }
+        Get-ChildItem artifacts | Format-Table Name, Length
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: bevy-cuboid-game-${{ matrix.arch }}
+        path: artifacts/*
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error

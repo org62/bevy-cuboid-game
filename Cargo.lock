@@ -275,6 +275,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy-cuboid-game"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "smol_str",
+ "winresource",
+]
+
+[[package]]
 name = "bevy_a11y"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -409,15 +418,6 @@ dependencies = [
  "radsort",
  "serde",
  "smallvec",
-]
-
-[[package]]
-name = "bevy_debugger_challenge"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "smol_str",
- "winresource",
 ]
 
 [[package]]
