@@ -117,20 +117,31 @@ struct AttemptCounterText;
 fn check_password(input: &str) -> bool {
     let correct: &[u8] = b"sesame";
     let input_bytes = input.as_bytes();
-    // Length gate first: without it the compare loop indexes past the end of a
-    // short input and panics (typing "ses" + Enter crashed the game), and a
-    // longer input like "sesameXX" would pass on its prefix alone.
-    if input_bytes.len() != correct.len() {
-        return false;
-    }
-    let mut i: usize = 0;
-    while i < correct.len() {
-        if input_bytes[i] != correct[i] {
-            return false;
+    // Deliberately NOT length-gated up front: the whole point of this level is
+    // that a player can park a read watchpoint on their input buffer and watch
+    // the comparison walk it byte by byte. An `if len != 6` gate skips the
+    // compare loop entirely for any wrong-length input, so a player who typed
+    // "aaa" sees nothing fire and concludes the buffer is never read.
+    //
+    // Instead each byte is guarded by only the bounds check it immediately
+    // needs, nested one level per character. Short inputs are compared as far
+    // as they go (so the watchpoint fires), then bail out; the innermost check
+    // is `len() == 6`, which rejects a longer input like "sesameXX" that
+    // matches on its prefix.
+    if input_bytes.len() > 0 && input_bytes[0] == correct[0] {
+        if input_bytes.len() > 1 && input_bytes[1] == correct[1] {
+            if input_bytes.len() > 2 && input_bytes[2] == correct[2] {
+                if input_bytes.len() > 3 && input_bytes[3] == correct[3] {
+                    if input_bytes.len() > 4 && input_bytes[4] == correct[4] {
+                        if input_bytes.len() > 5 && input_bytes[5] == correct[5] {
+                            return input_bytes.len() == correct.len();
+                        }
+                    }
+                }
+            }
         }
-        i += 1;
     }
-    true
+    false
 }
 
 // --- Systems ---
@@ -379,6 +390,21 @@ mod tests {
         // Verify partial matches still fail
         assert!(!check_password("sesam\0"));
         assert!(!check_password("sesame\0"));
+    }
+
+    #[test]
+    fn short_and_long_inputs_are_rejected_without_panicking() {
+        // Every prefix of the password is compared as far as it goes (that is
+        // what makes the watchpoint fire) and then rejected - none of these may
+        // index past the end of the input.
+        for len in 0..6 {
+            assert!(!check_password(&"sesame"[..len]), "prefix of len {len}");
+        }
+        // A longer input matching on its prefix must still fail.
+        assert!(!check_password("sesameXX"));
+        // Wrong-length inputs that diverge early are fine too.
+        assert!(!check_password("a"));
+        assert!(!check_password("aaaaaaaaaaaa"));
     }
 
     #[test]

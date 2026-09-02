@@ -18,10 +18,10 @@ const PASSWORD_MAX: Vec2 = Vec2::new(13.0, 4.0);
 /// search-and-watchpoint first because it needs no symbols.
 const PASSWORD_SOLUTION: &str = "\
 Approach 1 - memory search + watchpoint (robust, needs no symbols):
-1) Type a 6-character string like \"aaaaaa\". The length must be 6, or check_password's compare loop is skipped entirely.
+1) Type any string, e.g. \"aaaaaa\" - check_password compares byte by byte and reads your input even when the length is wrong.
 2) Search memory for those bytes - they live in PasswordInput.text (a heap-allocated String).
 3) Set a hardware READ watchpoint on that address (\"find what accesses this address\").
-4) Press Enter. check_password reads your bytes one at a time and the watchpoint fires inside the loop.
+4) Press Enter. check_password reads your bytes one at a time and the watchpoint fires on the first compare.
 5) Single-step and read what each byte is compared against: s, e, s, a, m, e. Enter \"sesame\".
 
 Approach 2 - breakpoint on the symbol (quick, but fragile):
